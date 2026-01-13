@@ -241,7 +241,7 @@ fn sand_snake_ai(
                 // If we grew, we consumed the space. If target was sand, it's eaten (destroyed).
                 if let Some(&target_entity) = voxel_world.blocks.get(&target) {
                     if target_entity != entity { // Don't despawn self
-                        commands.entity(target_entity).despawn();
+                        commands.entity(target_entity).despawn_recursive();
                         voxel_world.blocks.remove(&target); // Remove sand from map so head can take it
                     }
                 }
@@ -272,7 +272,7 @@ fn sand_snake_ai(
                             update_voxel_map(&mut commands, &mut voxel_world, target, tail_pos, target_entity);
                         } else {
                             // Tail blocked? Just destroy sand (eaten)
-                            commands.entity(target_entity).despawn();
+                            commands.entity(target_entity).despawn_recursive();
                             voxel_world.blocks.remove(&target);
                         }
                      }

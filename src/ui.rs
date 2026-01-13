@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use bevy::input::mouse::MouseWheel;
 use crate::world::VoxelAssets;
 use crate::player::{Health, Player};
 use std::collections::HashMap;
@@ -181,7 +182,9 @@ fn setup_ui(mut commands: Commands) {
 fn inventory_input(
     keys: Res<ButtonInput<KeyCode>>,
     mut inventory: ResMut<Inventory>,
+    mut scroll_events: EventReader<MouseWheel>,
 ) {
+    // Number key selection
     if keys.just_pressed(KeyCode::Digit1) { inventory.selected_slot = 0; }
     if keys.just_pressed(KeyCode::Digit2) { inventory.selected_slot = 1; }
     if keys.just_pressed(KeyCode::Digit3) { inventory.selected_slot = 2; }
@@ -190,6 +193,21 @@ fn inventory_input(
     if keys.just_pressed(KeyCode::Digit6) { inventory.selected_slot = 5; }
     if keys.just_pressed(KeyCode::Digit7) { inventory.selected_slot = 6; }
     if keys.just_pressed(KeyCode::Digit8) { inventory.selected_slot = 7; }
+
+    // Scroll wheel cycling
+    for event in scroll_events.read() {
+        if event.y > 0.0 {
+            // Scroll up - previous slot
+            if inventory.selected_slot == 0 {
+                inventory.selected_slot = 7;
+            } else {
+                inventory.selected_slot -= 1;
+            }
+        } else if event.y < 0.0 {
+            // Scroll down - next slot
+            inventory.selected_slot = (inventory.selected_slot + 1) % 8;
+        }
+    }
 }
 
 fn update_inventory_ui(

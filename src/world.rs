@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use bevy::pbr::NotShadowCaster;
 use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
 use std::fs::File;
@@ -48,6 +49,8 @@ pub struct VoxelAssets {
     pub mesh: Handle<Mesh>,
     pub water_meshes: Vec<Handle<Mesh>>,
     pub faces_meshes: Vec<Handle<Mesh>>,
+    pub wireframe_mesh: Handle<Mesh>,
+    pub wireframe_material: Handle<StandardMaterial>,
     pub _material: Handle<StandardMaterial>,
     pub block_types: Vec<Handle<StandardMaterial>>,
     pub block_names: Vec<String>,
@@ -62,6 +65,7 @@ pub struct VoxelAssets {
 pub struct VoxelSounds {
     pub place: Handle<AudioSource>,
     pub break_sound: Handle<AudioSource>,
+    pub footstep: Handle<AudioSource>,
 }
 
 #[derive(Resource, Default)]
@@ -113,14 +117,27 @@ fn setup_world(
     mut materials: ResMut<Assets<StandardMaterial>>,
     asset_server: Res<AssetServer>,
 ) {
-    // Spawn a light
+    // Spawn a light - shadows disabled for performance
     commands.spawn(DirectionalLightBundle {
         directional_light: DirectionalLight {
-            shadows_enabled: true,
+            shadows_enabled: false, // Disabled for significant performance boost
             illuminance: 10000.0,
             ..default()
         },
         transform: Transform::from_xyz(50.0, 50.0, 50.0).looking_at(Vec3::ZERO, Vec3::Y),
+        ..default()
+    });
+
+    // Dark background plane - makes gaps between blocks appear as black outlines
+    let dark_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.02, 0.02, 0.02),
+        unlit: true, // Don't respond to lighting
+        ..default()
+    });
+    commands.spawn(PbrBundle {
+        mesh: meshes.add(Plane3d::new(Vec3::Y, Vec2::splat(500.0))),
+        material: dark_mat,
+        transform: Transform::from_xyz(0.0, -20.0, 0.0),
         ..default()
     });
 
@@ -129,6 +146,7 @@ fn setup_world(
     
     // Generate 64 meshes for all face combinations (Greedy-ish meshing per block)
     // Bitmask: 1:+X, 2:-X, 4:+Y, 8:-Y, 16:+Z, 32:-Z
+    // Slightly smaller blocks (0.48 instead of 0.5) create thin gaps that act as borders
     let mut faces_meshes = Vec::new();
     for i in 0..64 {
         let mut positions = Vec::new();
@@ -136,6 +154,8 @@ fn setup_world(
         let mut uvs = Vec::new();
         let mut indices = Vec::new();
         let mut v_idx = 0;
+
+        const S: f32 = 0.48; // Slightly smaller to create border gaps
 
         let add_face = |pos: &mut Vec<[f32; 3]>, norm: &mut Vec<[f32; 3]>, uv: &mut Vec<[f32; 2]>, ind: &mut Vec<u32>, v: &mut u32, corners: [[f32; 3]; 4], normal: [f32; 3]| {
             pos.extend_from_slice(&corners);
@@ -146,17 +166,17 @@ fn setup_world(
         };
 
         // +X (Right)
-        if (i & 1) == 0 { add_face(&mut positions, &mut normals, &mut uvs, &mut indices, &mut v_idx, [[0.5, 0.5, 0.5], [0.5, -0.5, 0.5], [0.5, -0.5, -0.5], [0.5, 0.5, -0.5]], [1.0, 0.0, 0.0]); }
+        if (i & 1) == 0 { add_face(&mut positions, &mut normals, &mut uvs, &mut indices, &mut v_idx, [[S, S, S], [S, -S, S], [S, -S, -S], [S, S, -S]], [1.0, 0.0, 0.0]); }
         // -X (Left)
-        if (i & 2) == 0 { add_face(&mut positions, &mut normals, &mut uvs, &mut indices, &mut v_idx, [[-0.5, 0.5, -0.5], [-0.5, -0.5, -0.5], [-0.5, -0.5, 0.5], [-0.5, 0.5, 0.5]], [-1.0, 0.0, 0.0]); }
+        if (i & 2) == 0 { add_face(&mut positions, &mut normals, &mut uvs, &mut indices, &mut v_idx, [[-S, S, -S], [-S, -S, -S], [-S, -S, S], [-S, S, S]], [-1.0, 0.0, 0.0]); }
         // +Y (Top)
-        if (i & 4) == 0 { add_face(&mut positions, &mut normals, &mut uvs, &mut indices, &mut v_idx, [[-0.5, 0.5, 0.5], [0.5, 0.5, 0.5], [0.5, 0.5, -0.5], [-0.5, 0.5, -0.5]], [0.0, 1.0, 0.0]); }
+        if (i & 4) == 0 { add_face(&mut positions, &mut normals, &mut uvs, &mut indices, &mut v_idx, [[-S, S, S], [S, S, S], [S, S, -S], [-S, S, -S]], [0.0, 1.0, 0.0]); }
         // -Y (Bottom)
-        if (i & 8) == 0 { add_face(&mut positions, &mut normals, &mut uvs, &mut indices, &mut v_idx, [[-0.5, -0.5, -0.5], [0.5, -0.5, -0.5], [0.5, -0.5, 0.5], [-0.5, -0.5, 0.5]], [0.0, -1.0, 0.0]); }
+        if (i & 8) == 0 { add_face(&mut positions, &mut normals, &mut uvs, &mut indices, &mut v_idx, [[-S, -S, -S], [S, -S, -S], [S, -S, S], [-S, -S, S]], [0.0, -1.0, 0.0]); }
         // +Z (Back)
-        if (i & 16) == 0 { add_face(&mut positions, &mut normals, &mut uvs, &mut indices, &mut v_idx, [[0.5, 0.5, 0.5], [-0.5, 0.5, 0.5], [-0.5, -0.5, 0.5], [0.5, -0.5, 0.5]], [0.0, 0.0, 1.0]); }
+        if (i & 16) == 0 { add_face(&mut positions, &mut normals, &mut uvs, &mut indices, &mut v_idx, [[S, S, S], [-S, S, S], [-S, -S, S], [S, -S, S]], [0.0, 0.0, 1.0]); }
         // -Z (Front)
-        if (i & 32) == 0 { add_face(&mut positions, &mut normals, &mut uvs, &mut indices, &mut v_idx, [[-0.5, 0.5, -0.5], [0.5, 0.5, -0.5], [0.5, -0.5, -0.5], [-0.5, -0.5, -0.5]], [0.0, 0.0, -1.0]); }
+        if (i & 32) == 0 { add_face(&mut positions, &mut normals, &mut uvs, &mut indices, &mut v_idx, [[-S, S, -S], [S, S, -S], [S, -S, -S], [-S, -S, -S]], [0.0, 0.0, -1.0]); }
 
         let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
@@ -165,6 +185,38 @@ fn setup_world(
         mesh.insert_indices(bevy::render::mesh::Indices::U32(indices));
         faces_meshes.push(meshes.add(mesh));
     }
+
+    // Create wireframe mesh for block outlines (12 edges of a cube)
+    let wireframe_mesh = {
+        const W: f32 = 0.501; // Slightly larger than block to prevent z-fighting
+        let positions: Vec<[f32; 3]> = vec![
+            // Bottom face edges
+            [-W, -W, -W], [W, -W, -W],
+            [W, -W, -W], [W, -W, W],
+            [W, -W, W], [-W, -W, W],
+            [-W, -W, W], [-W, -W, -W],
+            // Top face edges
+            [-W, W, -W], [W, W, -W],
+            [W, W, -W], [W, W, W],
+            [W, W, W], [-W, W, W],
+            [-W, W, W], [-W, W, -W],
+            // Vertical edges
+            [-W, -W, -W], [-W, W, -W],
+            [W, -W, -W], [W, W, -W],
+            [W, -W, W], [W, W, W],
+            [-W, -W, W], [-W, W, W],
+        ];
+        let mut mesh = Mesh::new(PrimitiveTopology::LineList, RenderAssetUsages::default());
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+        meshes.add(mesh)
+    };
+
+    // Black unlit material for wireframes
+    let wireframe_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.0, 0.0, 0.0),
+        unlit: true,
+        ..default()
+    });
 
     let mut water_meshes = Vec::new();
     for i in 0..9 {
@@ -190,11 +242,13 @@ fn setup_world(
     let segment_mesh = meshes.add(Cuboid::new(0.4, 0.4, 0.4));
     let eye_mat = materials.add(Color::BLACK);
     
-    commands.insert_resource(VoxelAssets { 
-        mesh, 
+    commands.insert_resource(VoxelAssets {
+        mesh,
         water_meshes,
         faces_meshes,
-        _material: grass.clone(), 
+        wireframe_mesh,
+        wireframe_material,
+        _material: grass.clone(),
         block_types: vec![grass, dirt, stone, wood, water, source, drain, sand, bedrock, snake_mat.clone(), snake_mat.clone()],
         block_names: vec!["Grass".to_string(), "Dirt".to_string(), "Stone".to_string(), "Wood".to_string(), "Water".to_string(), "Water Source".to_string(), "Water Drain".to_string(), "Sand".to_string(), "Bedrock".to_string(), "Snake".to_string(), "Snake Segment".to_string()],
         snake_material: snake_mat,
@@ -207,6 +261,7 @@ fn setup_world(
     commands.insert_resource(VoxelSounds {
         place: asset_server.load("sounds/place.mp3"),
         break_sound: asset_server.load("sounds/break.mp3"),
+        footstep: asset_server.load("sounds/footstep.mp3"),
     });
 }
 
@@ -230,23 +285,28 @@ fn update_particles(
 
 pub fn update_voxel_map(commands: &mut Commands, voxel_world: &mut VoxelWorld, old_pos: IVec3, new_pos: IVec3, entity: Entity) {
     voxel_world.blocks.remove(&old_pos);
-    
+
     voxel_world.blocks.insert(new_pos, entity);
-    commands.entity(entity).insert(NeedsMeshUpdate);
-    
+    // Use get_entity to safely handle despawned entities
+    if let Some(mut entity_commands) = commands.get_entity(entity) {
+        entity_commands.insert(NeedsMeshUpdate);
+    }
+
     let old_chunk = IVec2::new((old_pos.x as f32 / CHUNK_SIZE as f32).floor() as i32, (old_pos.z as f32 / CHUNK_SIZE as f32).floor() as i32);
-    
-    // Tag neighbors for update
+
+    // Tag neighbors for update (safely - they may have been despawned)
     for pos in [old_pos, new_pos] {
         for dir in [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z] {
             if let Some(&e) = voxel_world.blocks.get(&(pos + dir)) {
-                commands.entity(e).insert(NeedsMeshUpdate);
+                if let Some(mut entity_commands) = commands.get_entity(e) {
+                    entity_commands.insert(NeedsMeshUpdate);
+                }
             }
         }
     }
 
     let new_chunk = IVec2::new((new_pos.x as f32 / CHUNK_SIZE as f32).floor() as i32, (new_pos.z as f32 / CHUNK_SIZE as f32).floor() as i32);
-    
+
     if old_chunk != new_chunk {
         if let Some(chunk) = voxel_world.chunks.get_mut(&old_chunk) {
             if let Some(idx) = chunk.iter().position(|&p| p == old_pos) { chunk.remove(idx); }
@@ -265,7 +325,7 @@ fn update_chunks(
     player_query: Query<&Transform, With<Player>>,
 ) {
     let player_transform = player_query.single();
-    let render_distance = 2;
+    let render_distance = 3; // Reduced for better performance
 
     // Calculate the chunk the player is currently in
     let player_chunk = IVec2::new(
@@ -305,6 +365,7 @@ fn update_chunks(
                             };
 
                             if let Some(mat) = voxel_assets.block_types.get(block_type_idx) {
+                                // All blocks have shadow casting disabled for performance
                                 let id = commands.spawn((
                                     PbrBundle {
                                         mesh: voxel_assets.mesh.clone(),
@@ -313,8 +374,19 @@ fn update_chunks(
                                         ..default()
                                     },
                                     BlockType(block_type_idx),
-                                    NeedsMeshUpdate, // Calculate visibility on first frame
-                                )).id();
+                                    NeedsMeshUpdate,
+                                    NotShadowCaster,
+                                )).with_children(|parent| {
+                                    // Wireframe outline child
+                                    parent.spawn((
+                                        PbrBundle {
+                                            mesh: voxel_assets.wireframe_mesh.clone(),
+                                            material: voxel_assets.wireframe_material.clone(),
+                                            ..default()
+                                        },
+                                        NotShadowCaster,
+                                    ));
+                                }).id();
                                 voxel_world.blocks.insert(pos, id);
                                 chunk_blocks.push(pos);
                             }
@@ -339,7 +411,7 @@ fn update_chunks(
         if let Some(blocks) = voxel_world.chunks.remove(&chunk_coord) {
             for pos in blocks {
                 if let Some(entity) = voxel_world.blocks.remove(&pos) {
-                    commands.entity(entity).despawn();
+                    commands.entity(entity).despawn_recursive();
                 }
             }
         }
@@ -461,7 +533,7 @@ fn water_dynamics(
                         }
 
                         // Destroy Block
-                        commands.entity(neighbor).despawn();
+                        commands.entity(neighbor).despawn_recursive();
                         voxel_world.blocks.remove(&down);
                         let chunk_coord = IVec2::new((down.x as f32 / CHUNK_SIZE as f32).floor() as i32, (down.z as f32 / CHUNK_SIZE as f32).floor() as i32);
                         if let Some(chunk) = voxel_world.chunks.get_mut(&chunk_coord) {
@@ -561,10 +633,12 @@ fn water_dynamics(
                         );
                         voxel_world.chunks.entry(chunk_coord).or_default().push(target);
                         
-                        // Update neighbors
+                        // Update neighbors (safely handle despawned entities)
                         for dir in [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z] {
                             if let Some(&e) = voxel_world.blocks.get(&(target + dir)) {
-                                commands.entity(e).insert(NeedsMeshUpdate);
+                                if let Some(mut ec) = commands.get_entity(e) {
+                                    ec.insert(NeedsMeshUpdate);
+                                }
                             }
                         }
                     }
@@ -590,13 +664,15 @@ fn water_dynamics(
             if let Some(chunk) = voxel_world.chunks.get_mut(&chunk_coord) {
                 if let Some(idx) = chunk.iter().position(|&p| p == pos) { chunk.remove(idx); }
             }
-            // Update neighbors
+            // Update neighbors (safely handle despawned entities)
             for dir in [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z] {
                 if let Some(&e) = voxel_world.blocks.get(&(pos + dir)) {
-                    commands.entity(e).insert(NeedsMeshUpdate);
+                    if let Some(mut ec) = commands.get_entity(e) {
+                        ec.insert(NeedsMeshUpdate);
+                    }
                 }
             }
-            commands.entity(entity).despawn();
+            commands.entity(entity).despawn_recursive();
         }
     }
 }
@@ -786,7 +862,7 @@ fn save_load_world(
         if let Ok(file) = File::open("world.json") {
             // Clear existing world
             for (entity, _, _) in block_query.iter() {
-                commands.entity(entity).despawn();
+                commands.entity(entity).despawn_recursive();
             }
             voxel_world.blocks.clear();
             voxel_world.chunks.clear();

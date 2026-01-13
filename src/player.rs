@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 use bevy::input::mouse::MouseMotion;
 use crate::world::{VoxelWorld, VoxelAssets, VoxelSounds, BlockType, Liquid, WaterSource, WaterDrain, NeedsMeshUpdate, Particle, CHUNK_SIZE};
+use bevy::audio::Volume;
 use crate::mobs::SandSnake;
 use crate::ui::Inventory;
 use crate::ui::GameState;
@@ -9,6 +10,7 @@ use crate::ui::GameState;
 pub struct Player {
     pub velocity: Vec3,
     pub flying: bool,
+    pub footstep_timer: f32,
 }
 
 #[derive(Component)]
@@ -41,7 +43,7 @@ fn setup_player(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut ma
             transform: Transform::from_xyz(0.0, height as f32 + 5.0, 0.0),
             ..default()
         },
-        Player { velocity: Vec3::ZERO, flying: false },
+        Player { velocity: Vec3::ZERO, flying: false, footstep_timer: 0.0 },
         Health { value: 100, invulnerability_timer: Timer::from_seconds(1.0, TimerMode::Once) },
     )).with_children(|parent| {
         parent.spawn((
@@ -53,25 +55,27 @@ fn setup_player(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut ma
             bevy::pbr::FogSettings {
                 color: Color::srgb(0.5, 0.8, 0.9),
                 falloff: bevy::pbr::FogFalloff::Linear {
-                    start: 20.0,
-                    end: 60.0,
+                    start: 25.0,
+                    end: 55.0,
                 },
                 ..default()
             },
-            bevy::pbr::ScreenSpaceAmbientOcclusionSettings::default(),
+            // SSAO disabled for better performance
         ));
     });
 }
 
 fn move_player(
+    mut commands: Commands,
     mut query: Query<(&mut Transform, &mut Player)>,
-    mut camera_query: Query<&mut Transform, (With<MainCamera>, Without<Player>)>,
+    mut camera_query: Query<(&mut Transform, &GlobalTransform), (With<MainCamera>, Without<Player>)>,
     keys: Res<ButtonInput<KeyCode>>,
     mut mouse_motion: EventReader<MouseMotion>,
     mut windows: Query<&mut Window>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     time: Res<Time>,
     voxel_world: Res<VoxelWorld>,
+    voxel_sounds: Res<VoxelSounds>,
     block_type_query: Query<&BlockType>,
 ) {
     let mut window = windows.single_mut();
@@ -89,7 +93,7 @@ fn move_player(
         let sensitivity = 0.003;
         for event in mouse_motion.read() {
             transform.rotate_y(-event.delta.x * sensitivity);
-            if let Ok(mut camera_transform) = camera_query.get_single_mut() {
+            if let Ok((mut camera_transform, _)) = camera_query.get_single_mut() {
                 camera_transform.rotate_local_x(-event.delta.y * sensitivity);
             }
         }
@@ -114,7 +118,70 @@ fn move_player(
 
     if direction.length_squared() > 0.0 {
         direction = direction.normalize();
-        transform.translation += direction * speed * time.delta_seconds();
+        let move_delta = direction * speed * time.delta_seconds();
+        let new_pos = transform.translation + move_delta;
+
+        // Horizontal collision detection - check at feet and head level
+        let player_radius = 0.4;
+        let feet_y = (transform.translation.y - 0.5).round() as i32;
+        let head_y = (transform.translation.y + 0.5).round() as i32;
+
+        let mut can_move_x = true;
+        let mut can_move_z = true;
+
+        // Check collision in X direction
+        let check_x = (new_pos.x + player_radius * direction.x.signum()).round() as i32;
+        let check_z_current = transform.translation.z.round() as i32;
+        for y in feet_y..=head_y {
+            let check_pos = IVec3::new(check_x, y, check_z_current);
+            if let Some(&entity) = voxel_world.blocks.get(&check_pos) {
+                if let Ok(block_type) = block_type_query.get(entity) {
+                    if block_type.0 != 4 { // Not water
+                        can_move_x = false;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Check collision in Z direction
+        let check_x_current = transform.translation.x.round() as i32;
+        let check_z = (new_pos.z + player_radius * direction.z.signum()).round() as i32;
+        for y in feet_y..=head_y {
+            let check_pos = IVec3::new(check_x_current, y, check_z);
+            if let Some(&entity) = voxel_world.blocks.get(&check_pos) {
+                if let Ok(block_type) = block_type_query.get(entity) {
+                    if block_type.0 != 4 { // Not water
+                        can_move_z = false;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Apply movement with collision response
+        let moved = can_move_x || can_move_z;
+        if can_move_x {
+            transform.translation.x = new_pos.x;
+        }
+        if can_move_z {
+            transform.translation.z = new_pos.z;
+        }
+
+        // Footstep sounds when walking on ground
+        if moved && !player.flying && player.velocity.y.abs() < 0.1 {
+            player.footstep_timer += time.delta_seconds();
+            let footstep_interval = if keys.pressed(KeyCode::ShiftLeft) { 0.25 } else { 0.4 };
+            if player.footstep_timer >= footstep_interval {
+                player.footstep_timer = 0.0;
+                commands.spawn(AudioBundle {
+                    source: voxel_sounds.footstep.clone(),
+                    settings: PlaybackSettings::DESPAWN.with_volume(Volume::new(0.5)),
+                });
+            }
+        }
+    } else {
+        player.footstep_timer = 0.0;
     }
 
     // Toggle Fly Mode
@@ -126,11 +193,11 @@ fn move_player(
     // Physics / Gravity Logic
     let x = transform.translation.x.round() as i32;
     let z = transform.translation.z.round() as i32;
-    let current_y = transform.translation.y.round() as i32;
+    let feet_level = (transform.translation.y - 1.0).round() as i32;
 
-    // Scan for ground below player
+    // Scan for ground ONLY below player (not above - prevents auto-jump)
     let mut ground_y = -50.0; // Default abyss
-    for y in (current_y - 20..=current_y + 2).rev() {
+    for y in (feet_level - 20..=feet_level).rev() {
         let check_pos = IVec3::new(x, y, z);
         if let Some(&entity) = voxel_world.blocks.get(&check_pos) {
             // Only collide if NOT water (index 4)
@@ -163,7 +230,8 @@ fn move_player(
             player.velocity.y = 0.0;
 
             if keys.pressed(KeyCode::Space) {
-                player.velocity.y = 12.0;
+                // Jump height: v^2/(2g) = 9.5^2/(2*30) ≈ 1.5 blocks
+                player.velocity.y = 9.5;
             }
         }
     }
@@ -171,6 +239,42 @@ fn move_player(
     // Respawn if fell out of world
     if transform.translation.y < -30.0 {
         transform.translation = Vec3::new(0.0, 10.0, 0.0);
+    }
+
+    // Camera collision detection - prevent camera from clipping into blocks
+    if let Ok((_, camera_global)) = camera_query.get_single() {
+        let camera_pos = camera_global.translation();
+        let camera_block_pos = camera_pos.round().as_ivec3();
+
+        // Check if camera is inside a solid block
+        if let Some(&entity) = voxel_world.blocks.get(&camera_block_pos) {
+            if let Ok(block_type) = block_type_query.get(entity) {
+                // Only push back for solid blocks (not water/special blocks)
+                if block_type.0 != 4 && block_type.0 != 9 && block_type.0 != 10 {
+                    // Calculate push direction - move player away from block center
+                    let block_center = camera_block_pos.as_vec3();
+                    let offset = camera_pos - block_center;
+
+                    // Find the smallest axis to push out on
+                    let abs_offset = offset.abs();
+                    let push_dist = 0.6; // Slightly more than half a block
+
+                    if abs_offset.x <= abs_offset.y && abs_offset.x <= abs_offset.z {
+                        // Push on X axis
+                        let sign = if offset.x >= 0.0 { 1.0 } else { -1.0 };
+                        transform.translation.x = block_center.x + sign * push_dist;
+                    } else if abs_offset.y <= abs_offset.z {
+                        // Push on Y axis
+                        let sign = if offset.y >= 0.0 { 1.0 } else { -1.0 };
+                        transform.translation.y = block_center.y + sign * push_dist;
+                    } else {
+                        // Push on Z axis
+                        let sign = if offset.z >= 0.0 { 1.0 } else { -1.0 };
+                        transform.translation.z = block_center.z + sign * push_dist;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -242,16 +346,18 @@ fn interact_terrain(
                         }
                     }
 
-                    commands.entity(entity).despawn();
+                    commands.entity(entity).despawn_recursive();
                     commands.spawn(AudioBundle {
                         source: voxel_sounds.break_sound.clone(),
                         settings: PlaybackSettings::DESPAWN,
                     });
 
-                    // Update neighbors
+                    // Update neighbors (safely handle despawned entities)
                     for dir in [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z] {
                         if let Some(&e) = voxel_world.blocks.get(&(block_pos + dir)) {
-                            commands.entity(e).insert(NeedsMeshUpdate);
+                            if let Some(mut ec) = commands.get_entity(e) {
+                                ec.insert(NeedsMeshUpdate);
+                            }
                         }
                     }
                 }
@@ -279,9 +385,20 @@ fn interact_terrain(
                                 ..default()
                             },
                             BlockType(slot),
+                            NeedsMeshUpdate,
                         ));
 
-                        entity_cmds.insert(NeedsMeshUpdate);
+                        // Add wireframe child for outline (skip for water)
+                        if slot != 4 {
+                            entity_cmds.with_children(|parent| {
+                                parent.spawn(PbrBundle {
+                                    mesh: voxel_assets.wireframe_mesh.clone(),
+                                    material: voxel_assets.wireframe_material.clone(),
+                                    ..default()
+                                });
+                            });
+                        }
+
                         // If placing water (index 4), add Liquid component
                         if slot == 4 {
                             entity_cmds.insert(Liquid { level: 1 });
@@ -297,10 +414,12 @@ fn interact_terrain(
                             settings: PlaybackSettings::DESPAWN,
                         });
                         
-                        // Update neighbors
+                        // Update neighbors (safely handle despawned entities)
                         for dir in [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z] {
                             if let Some(&e) = voxel_world.blocks.get(&(prev_pos + dir)) {
-                                commands.entity(e).insert(NeedsMeshUpdate);
+                                if let Some(mut ec) = commands.get_entity(e) {
+                                    ec.insert(NeedsMeshUpdate);
+                                }
                             }
                         }
                         // Register new block in the chunk system so it gets cleaned up later
