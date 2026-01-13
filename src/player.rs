@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 use bevy::input::mouse::MouseMotion;
-use crate::world::{VoxelWorld, VoxelAssets, VoxelSounds, BlockType, Liquid, WaterSource, WaterDrain, NeedsMeshUpdate, Particle, CHUNK_SIZE};
+use crate::world::{VoxelWorld, VoxelAssets, VoxelSounds, BlockType, Liquid, WaterSource, WaterDrain, NeedsMeshUpdate, Particle, SandSnake, CHUNK_SIZE};
 use crate::ui::Inventory;
 
 #[derive(Component)]
@@ -12,12 +12,18 @@ pub struct Player {
 #[derive(Component)]
 pub struct MainCamera;
 
+#[derive(Component)]
+pub struct Health {
+    pub value: i32,
+    pub invulnerability_timer: Timer,
+}
+
 pub struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, setup_player)
-           .add_systems(Update, (move_player, interact_terrain));
+           .add_systems(Update, (move_player, interact_terrain, check_snake_collision));
     }
 }
 
@@ -34,6 +40,7 @@ fn setup_player(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut ma
             ..default()
         },
         Player { velocity: Vec3::ZERO, flying: false },
+        Health { value: 100, invulnerability_timer: Timer::from_seconds(1.0, TimerMode::Once) },
     )).with_children(|parent| {
         parent.spawn((
             Camera3dBundle {
@@ -174,7 +181,7 @@ fn interact_terrain(
     mut voxel_world: ResMut<VoxelWorld>,
     voxel_assets: Res<VoxelAssets>,
     voxel_sounds: Res<VoxelSounds>,
-    inventory: Res<Inventory>,
+    mut inventory: ResMut<Inventory>,
     camera_query: Query<&GlobalTransform, With<MainCamera>>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     window_query: Query<&Window>,
@@ -205,6 +212,8 @@ fn interact_terrain(
                 if let Some(&entity) = voxel_world.blocks.get(&block_pos) {
                     if let Ok(block_type) = block_type_query.get(entity) {
                         if block_type.0 == 8 { continue; }
+                        // Add to inventory
+                        *inventory.items.entry(block_type.0).or_insert(0) += 1;
                     }
                 }
 
@@ -251,12 +260,18 @@ fn interact_terrain(
             } else if mouse_buttons.just_pressed(MouseButton::Right) {
                 let prev_pos = (ray_pos - ray_dir * 0.1).round().as_ivec3();
                 if !voxel_world.blocks.contains_key(&prev_pos) {
-                    if let Some(mat) = voxel_assets.block_types.get(inventory.selected_slot) {
-                        let mesh = if inventory.selected_slot == 4 {
-                            voxel_assets.water_meshes[8].clone()
-                        } else {
-                            voxel_assets.mesh.clone()
-                        };
+                    let slot = inventory.selected_slot;
+                    let count = inventory.items.entry(slot).or_insert(0);
+                    
+                    if *count > 0 {
+                        if let Some(mat) = voxel_assets.block_types.get(slot) {
+                            *count -= 1;
+
+                            let mesh = if slot == 4 {
+                                voxel_assets.water_meshes[8].clone()
+                            } else {
+                                voxel_assets.mesh.clone()
+                            };
 
                         let mut entity_cmds = commands.spawn((
                             PbrBundle {
@@ -265,16 +280,16 @@ fn interact_terrain(
                                 transform: Transform::from_xyz(prev_pos.x as f32, prev_pos.y as f32, prev_pos.z as f32),
                                 ..default()
                             },
-                            BlockType(inventory.selected_slot),
+                            BlockType(slot),
                         ));
 
                         entity_cmds.insert(NeedsMeshUpdate);
                         // If placing water (index 4), add Liquid component
-                        if inventory.selected_slot == 4 {
+                        if slot == 4 {
                             entity_cmds.insert(Liquid { level: 1 });
                         }
-                        if inventory.selected_slot == 5 { entity_cmds.insert(WaterSource); }
-                        if inventory.selected_slot == 6 { entity_cmds.insert(WaterDrain); }
+                        if slot == 5 { entity_cmds.insert(WaterSource); }
+                        if slot == 6 { entity_cmds.insert(WaterDrain); }
 
                         let id = entity_cmds.id();
 
@@ -298,10 +313,37 @@ fn interact_terrain(
                         if let Some(chunk) = voxel_world.chunks.get_mut(&chunk_coord) {
                             chunk.push(prev_pos);
                         }
+                        }
                     }
                 }
             }
             break;
+        }
+    }
+}
+
+fn check_snake_collision(
+    mut player_query: Query<(&Transform, &mut Health, &mut Player)>,
+    snake_query: Query<&Transform, With<SandSnake>>,
+    time: Res<Time>,
+) {
+    if let Ok((player_transform, mut health, mut player)) = player_query.get_single_mut() {
+        health.invulnerability_timer.tick(time.delta());
+
+        if !health.invulnerability_timer.finished() {
+            return;
+        }
+
+        for snake_transform in snake_query.iter() {
+            if player_transform.translation.distance(snake_transform.translation) < 1.2 {
+                health.value -= 10;
+                health.invulnerability_timer.reset();
+                info!("Player hit by snake! Health: {}", health.value);
+                
+                // Knockback
+                let dir = (player_transform.translation - snake_transform.translation).normalize_or_zero();
+                player.velocity += dir * 15.0 + Vec3::Y * 5.0;
+            }
         }
     }
 }
