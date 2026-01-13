@@ -1,0 +1,10 @@
+[package]
+name = "voxel-game"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bevy = { version = "0.14", features = ["bevy_dev_tools","mp3"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+noise = "0.9"
