@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 use bevy::input::mouse::MouseMotion;
-use crate::world::{VoxelWorld, VoxelAssets, VoxelSounds, BlockType, Liquid, WaterSource, WaterDrain, NeedsMeshUpdate, Particle, SandSnake, CHUNK_SIZE};
+use crate::world::{VoxelWorld, VoxelAssets, VoxelSounds, BlockType, Liquid, WaterSource, WaterDrain, NeedsMeshUpdate, Particle, CHUNK_SIZE};
+use crate::mobs::SandSnake;
 use crate::ui::Inventory;
 
 #[derive(Component)]

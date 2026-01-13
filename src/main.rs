@@ -1,12 +1,14 @@
 mod player;
 mod world;
 mod ui;
+mod mobs;
 
 use bevy::prelude::*;
 use bevy::dev_tools::fps_overlay::{FpsOverlayConfig, FpsOverlayPlugin};
 use player::PlayerPlugin;
 use world::WorldPlugin;
 use ui::UiPlugin;
+use mobs::MobsPlugin;
 
 fn main() {
     App::new()
@@ -31,6 +33,7 @@ fn main() {
             WorldPlugin,
             PlayerPlugin,
             UiPlugin,
+            MobsPlugin,
         ))
         .run();
 }
