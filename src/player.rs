@@ -3,6 +3,7 @@ use bevy::input::mouse::MouseMotion;
 use crate::world::{VoxelWorld, VoxelAssets, VoxelSounds, BlockType, Liquid, WaterSource, WaterDrain, NeedsMeshUpdate, Particle, CHUNK_SIZE};
 use crate::mobs::SandSnake;
 use crate::ui::Inventory;
+use crate::ui::GameState;
 
 #[derive(Component)]
 pub struct Player {
@@ -24,7 +25,7 @@ pub struct PlayerPlugin;
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, setup_player)
-           .add_systems(Update, (move_player, interact_terrain, check_snake_collision));
+           .add_systems(Update, (move_player, interact_terrain, check_snake_collision).run_if(in_state(GameState::Playing)));
     }
 }
 
@@ -79,10 +80,6 @@ fn move_player(
     if mouse_buttons.just_pressed(MouseButton::Left) {
         window.cursor.visible = false;
         window.cursor.grab_mode = bevy::window::CursorGrabMode::Locked;
-    }
-    if keys.just_pressed(KeyCode::Escape) {
-        window.cursor.visible = true;
-        window.cursor.grab_mode = bevy::window::CursorGrabMode::None;
     }
 
     let (mut transform, mut player) = query.single_mut();

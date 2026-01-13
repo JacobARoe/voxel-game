@@ -6,6 +6,7 @@ use std::io::BufReader;
 use noise::{NoiseFn, Perlin};
 use bevy::render::{mesh::PrimitiveTopology, render_asset::RenderAssetUsages};
 use crate::player::Player;
+use crate::ui::GameState;
 
 pub const CHUNK_SIZE: i32 = 16;
 
@@ -83,15 +84,15 @@ impl Plugin for WorldPlugin {
            .insert_resource(WorldGen { _seed: 42, perlin: Perlin::new(42) })
            .add_systems(Startup, setup_world)
            .add_systems(Update, (
-               update_chunks, 
-               update_particles, 
-               save_load_world, 
-               water_dynamics, 
-               update_water_level, 
-               water_source_system, 
-               water_drain_system, 
-               sand_dynamics, 
-           ))
+               update_chunks,
+               update_particles,
+               save_load_world,
+               water_dynamics,
+               update_water_level,
+               water_source_system,
+               water_drain_system,
+               sand_dynamics,
+           ).run_if(in_state(GameState::Playing)))
            .add_systems(PostUpdate, update_mesh_system);
     }
 }
@@ -184,9 +185,9 @@ fn setup_world(
     let drain = materials.add(Color::srgb(0.2, 0.0, 0.0));
     let bedrock = materials.add(Color::srgb(0.1, 0.1, 0.1));
     let snake_mat = materials.add(Color::srgb(0.2, 0.8, 0.2));
-    let snake_mesh = meshes.add(Cuboid::new(0.3, 0.3, 0.9));
+    let snake_mesh = meshes.add(Cuboid::new(0.5, 0.5, 0.9));
     let eye_mesh = meshes.add(Cuboid::new(0.05, 0.05, 0.05));
-    let segment_mesh = meshes.add(Cuboid::new(0.22, 0.22, 0.22));
+    let segment_mesh = meshes.add(Cuboid::new(0.4, 0.4, 0.4));
     let eye_mat = materials.add(Color::BLACK);
     
     commands.insert_resource(VoxelAssets { 

@@ -3,6 +3,13 @@ use crate::world::VoxelAssets;
 use crate::player::{Health, Player};
 use std::collections::HashMap;
 
+#[derive(States, Debug, Clone, Copy, Eq, PartialEq, Hash, Default)]
+pub enum GameState {
+    #[default]
+    Playing,
+    Paused,
+}
+
 #[derive(Resource)]
 pub struct Inventory {
     pub selected_slot: usize,
@@ -32,13 +39,19 @@ pub struct SelectedBlockText;
 #[derive(Component)]
 pub struct HealthText;
 
+#[derive(Component)]
+pub struct PauseMenu;
+
 pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(Inventory::default())
+        app.init_state::<GameState>()
+            .insert_resource(Inventory::default())
             .add_systems(Startup, setup_ui)
-            .add_systems(Update, (inventory_input, update_inventory_ui, update_health_ui));
+            .add_systems(Update, (inventory_input.run_if(in_state(GameState::Playing)), update_inventory_ui, update_health_ui, toggle_pause))
+            .add_systems(OnEnter(GameState::Paused), spawn_pause_menu)
+            .add_systems(OnExit(GameState::Paused), despawn_pause_menu);
     }
 }
 
@@ -217,6 +230,63 @@ fn update_inventory_ui(
         if let Some(name) = voxel_assets.block_names.get(inventory.selected_slot) {
             text.sections[0].value = name.clone();
         }
+    }
+}
+
+fn toggle_pause(
+    mut next_state: ResMut<NextState<GameState>>,
+    state: Res<State<GameState>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut windows: Query<&mut Window>,
+) {
+    if keys.just_pressed(KeyCode::Escape) {
+        let mut window = windows.single_mut();
+        match state.get() {
+            GameState::Playing => {
+                next_state.set(GameState::Paused);
+                window.cursor.visible = true;
+                window.cursor.grab_mode = bevy::window::CursorGrabMode::None;
+            },
+            GameState::Paused => {
+                next_state.set(GameState::Playing);
+                window.cursor.visible = false;
+                window.cursor.grab_mode = bevy::window::CursorGrabMode::Locked;
+            }
+        }
+    }
+}
+
+fn spawn_pause_menu(mut commands: Commands) {
+    commands.spawn((
+        NodeBundle {
+            style: Style {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                position_type: PositionType::Absolute,
+                ..default()
+            },
+            background_color: Color::srgba(0.0, 0.0, 0.0, 0.5).into(),
+            z_index: ZIndex::Global(10),
+            ..default()
+        },
+        PauseMenu,
+    )).with_children(|parent| {
+        parent.spawn(TextBundle::from_section(
+            "PAUSED",
+            TextStyle {
+                font_size: 60.0,
+                color: Color::WHITE,
+                ..default()
+            },
+        ));
+    });
+}
+
+fn despawn_pause_menu(mut commands: Commands, query: Query<Entity, With<PauseMenu>>) {
+    for entity in query.iter() {
+        commands.entity(entity).despawn_recursive();
     }
 }
 

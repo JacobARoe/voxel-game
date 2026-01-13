@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 use crate::world::{VoxelWorld, VoxelAssets, BlockType, NeedsMeshUpdate, Particle, CHUNK_SIZE, update_voxel_map};
 use crate::player::Player;
+use crate::ui::GameState;
 
 #[derive(Component)]
 pub struct SandSnake {
@@ -14,7 +15,7 @@ pub struct MobsPlugin;
 
 impl Plugin for MobsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (spawn_snakes, sand_snake_ai));
+        app.add_systems(Update, (spawn_snakes, sand_snake_ai).run_if(in_state(GameState::Playing)));
     }
 }
 
@@ -34,7 +35,7 @@ fn spawn_snakes(
              
              // Initialize history
              for i in 0..20 {
-                 history.push(pos.as_vec3() + Vec3::Y * (i as f32 * 0.2));
+                 history.push(pos.as_vec3() + Vec3::new(0.0, -0.25, 0.0) + Vec3::Y * (i as f32 * 0.2));
              }
              
              // Spawn initial segments
@@ -52,7 +53,7 @@ fn spawn_snakes(
                 PbrBundle {
                     mesh: voxel_assets.snake_mesh.clone(),
                     material: voxel_assets.snake_material.clone(),
-                    transform: Transform::from_xyz(pos.x as f32, pos.y as f32, pos.z as f32),
+                    transform: Transform::from_xyz(pos.x as f32, pos.y as f32 - 0.25, pos.z as f32),
                     ..default()
                 },
                 SandSnake { 
@@ -67,13 +68,13 @@ fn spawn_snakes(
                 parent.spawn(PbrBundle {
                     mesh: voxel_assets.eye_mesh.clone(),
                     material: voxel_assets.eye_material.clone(),
-                    transform: Transform::from_xyz(0.1, 0.15, -0.4),
+                    transform: Transform::from_xyz(0.15, 0.25, -0.4),
                     ..default()
                 });
                 parent.spawn(PbrBundle {
                     mesh: voxel_assets.eye_mesh.clone(),
                     material: voxel_assets.eye_material.clone(),
-                    transform: Transform::from_xyz(-0.1, 0.15, -0.4),
+                    transform: Transform::from_xyz(-0.15, 0.25, -0.4),
                     ..default()
                 });
              }).id();
@@ -180,14 +181,15 @@ fn sand_snake_ai(
 
         if let Some(target) = target_opt {
             // Rotate Head
+            let target_vec = target.as_vec3() + Vec3::new(0.0, -0.25, 0.0);
             let up = if (target - pos).y == 0 { Vec3::Y } else { Vec3::X };
-            transform.look_at(target.as_vec3(), up);
+            transform.look_at(target_vec, up);
 
             // Move Head
-            transform.translation = target.as_vec3();
+            transform.translation = target_vec;
             
             // Update History
-            snake.history.insert(0, target.as_vec3());
+            snake.history.insert(0, target_vec);
             
             // Update Segments Visuals
             let spacing = 0.2;
@@ -228,7 +230,7 @@ fn sand_snake_ai(
                     PbrBundle {
                         mesh: voxel_assets.segment_mesh.clone(),
                         material: voxel_assets.snake_material.clone(),
-                        transform: Transform::from_translation(snake.history.last().copied().unwrap_or(target.as_vec3())),
+                        transform: Transform::from_translation(snake.history.last().copied().unwrap_or(target_vec)),
                         ..default()
                     },
                 )).id();
