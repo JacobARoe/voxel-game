@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
 use std::fs::File;
 use std::io::BufReader;
+use std::time::Duration;
 use noise::{NoiseFn, Perlin};
 use bevy::render::{mesh::PrimitiveTopology, render_asset::RenderAssetUsages};
 use crate::player::Player;
@@ -323,9 +324,23 @@ fn update_chunks(
     voxel_assets: Res<VoxelAssets>,
     world_gen: Res<WorldGen>,
     player_query: Query<&Transform, With<Player>>,
+    mut last_player_chunk: Local<Option<IVec2>>,
+    mut chunk_update_timer: Local<Option<Timer>>,
 ) {
+    // Initialize the timer if it hasn't been initialized yet
+    if chunk_update_timer.is_none() {
+        *chunk_update_timer = Some(Timer::from_seconds(0.1, TimerMode::Repeating));
+    }
+
+    let timer = chunk_update_timer.as_mut().unwrap();
+
+    // Only update chunks every 0.1 seconds to reduce performance impact
+    if !timer.tick(Duration::from_secs_f32(0.1)).just_finished() {
+        return;
+    }
+
     let player_transform = player_query.single();
-    let render_distance = 4; // Increased to prevent premature derendering at FOV edges
+    let render_distance = 5; // Reduced from 6 to improve performance
 
     // Calculate the chunk the player is currently in
     let player_chunk = IVec2::new(
@@ -333,26 +348,35 @@ fn update_chunks(
         (player_transform.translation.z / CHUNK_SIZE as f32).floor() as i32,
     );
 
+    // Only update if player moved to a new chunk
+    if let Some(last_chunk) = *last_player_chunk {
+        if last_chunk == player_chunk {
+            return; // No need to update if player hasn't moved to a new chunk
+        }
+    }
+
+    *last_player_chunk = Some(player_chunk);
+
     // Spawn chunks around player
     for x in -render_distance..=render_distance {
         for z in -render_distance..=render_distance {
             let chunk_coord = player_chunk + IVec2::new(x, z);
-            
+
             if !voxel_world.chunks.contains_key(&chunk_coord) {
                 let mut chunk_blocks = Vec::new();
-                
+
                 for bx in 0..CHUNK_SIZE {
                     for bz in 0..CHUNK_SIZE {
                         let world_x = chunk_coord.x * CHUNK_SIZE + bx;
                         let world_z = chunk_coord.y * CHUNK_SIZE + bz;
-                        
+
                         // Layered generation
                         let (stone_h, _, height) = get_terrain_height(world_x, world_z, &world_gen.perlin);
-                        
+
                         // Generate column from Bedrock up to Height
                         for y in -16..=height {
                             let pos = IVec3::new(world_x, y, world_z);
-                            
+
                             // Determine Block Type
                             let block_type_idx = if y == -16 {
                                 8 // Bedrock
@@ -377,15 +401,17 @@ fn update_chunks(
                                     NeedsMeshUpdate,
                                     NotShadowCaster,
                                 )).with_children(|parent| {
-                                    // Wireframe outline child
-                                    parent.spawn((
-                                        PbrBundle {
-                                            mesh: voxel_assets.wireframe_mesh.clone(),
-                                            material: voxel_assets.wireframe_material.clone(),
-                                            ..default()
-                                        },
-                                        NotShadowCaster,
-                                    ));
+                                    // Wireframe outline child - only add for visible blocks
+                                    if block_type_idx != 4 { // Skip wireframe for water
+                                        parent.spawn((
+                                            PbrBundle {
+                                                mesh: voxel_assets.wireframe_mesh.clone(),
+                                                material: voxel_assets.wireframe_material.clone(),
+                                                ..default()
+                                            },
+                                            NotShadowCaster,
+                                        ));
+                                    }
                                 }).id();
                                 voxel_world.blocks.insert(pos, id);
                                 chunk_blocks.push(pos);
@@ -424,15 +450,37 @@ fn update_mesh_system(
     voxel_assets: Res<VoxelAssets>,
     mut query: Query<(Entity, &Transform, &BlockType), With<NeedsMeshUpdate>>,
     block_type_query: Query<&BlockType>,
+    mut mesh_update_timer: Local<Option<Timer>>,
+    time: Res<Time>,
 ) {
+    // Initialize the timer if it hasn't been initialized yet
+    if mesh_update_timer.is_none() {
+        *mesh_update_timer = Some(Timer::from_seconds(0.016, TimerMode::Repeating)); // ~60 times per second max
+    }
+
+    let timer = mesh_update_timer.as_mut().unwrap();
+
+    // Only update a limited number of meshes per frame to maintain performance
+    if !timer.tick(time.delta()).just_finished() {
+        return;
+    }
+
+    // Process only a limited number of blocks per frame to avoid frame drops
+    let mut processed_count = 0;
+    const MAX_UPDATES_PER_FRAME: usize = 50; // Limit updates per frame
+
     for (entity, transform, block_type) in query.iter_mut() {
+        if processed_count >= MAX_UPDATES_PER_FRAME {
+            break;
+        }
+
         let pos = transform.translation.round().as_ivec3();
         if voxel_world.blocks.get(&pos) != Some(&entity) {
             continue;
         }
 
         commands.entity(entity).remove::<NeedsMeshUpdate>();
-        
+
         // Don't cull faces for water (complex) or special blocks, just solid ones
         if block_type.0 == 4 || block_type.0 == 9 || block_type.0 == 10 { continue; }
 
@@ -460,6 +508,8 @@ fn update_mesh_system(
         } else {
             commands.entity(entity).insert(voxel_assets.faces_meshes[mask].clone());
         }
+
+        processed_count += 1;
     }
 }
 
@@ -471,11 +521,19 @@ fn water_dynamics(
     block_type_query: Query<&BlockType>,
     block_material_query: Query<&Handle<StandardMaterial>>,
     time: Res<Time>,
-    mut timer: Local<f32>,
+    mut water_update_timer: Local<Option<Timer>>,
 ) {
-    *timer += time.delta_seconds();
-    if *timer < 0.05 { return; } // Run faster for smoother flow
-    *timer = 0.0;
+    // Initialize the timer if it hasn't been initialized yet
+    if water_update_timer.is_none() {
+        *water_update_timer = Some(Timer::from_seconds(0.2, TimerMode::Repeating)); // Slower update rate
+    }
+
+    let timer = water_update_timer.as_mut().unwrap();
+
+    // Only update water dynamics periodically to reduce performance impact
+    if !timer.tick(time.delta()).just_finished() {
+        return;
+    }
 
     // Collect liquid entities with their positions
     let mut liquid_entities: Vec<(Entity, IVec3)> = query.iter()
@@ -485,11 +543,19 @@ fn water_dynamics(
         })
         .filter(|(e, pos)| voxel_world.blocks.get(pos) == Some(e))
         .collect();
-    
+
     // Sort by Y ascending (bottom-up) so lower blocks move first
     liquid_entities.sort_by_key(|(_, pos)| pos.y);
 
+    // Limit the number of water blocks processed per update to maintain performance
+    let max_processed = (liquid_entities.len() / 3).max(1); // Process 33% of water blocks per update
+    let mut processed_count = 0;
+
     for (entity, mut pos) in liquid_entities {
+        if processed_count >= max_processed {
+            break;
+        }
+
         // Optimization: Only update if exposed to air (at least one empty neighbor)
         let mut exposed = false;
         for offset in [IVec3::Y, IVec3::NEG_Y, IVec3::X, IVec3::NEG_X, IVec3::Z, IVec3::NEG_Z] {
@@ -504,16 +570,16 @@ fn water_dynamics(
         if let Ok((_, _, liq)) = query.get(entity) { my_level = liq.level; }
         if my_level == 0 { continue; }
 
-        // Erosion Logic: Small chance to erode block below if it is soft (Grass=0, Dirt=1, Sand=7)
+        // Reduce erosion chance significantly to improve performance
         let pseudo_rand = (pos.x as f32 * 13.0 + pos.y as f32 * 37.0 + pos.z as f32 * 19.0 + time.elapsed_seconds() * 100.0).sin().abs();
-        if pseudo_rand < 0.005 { // 0.5% chance per tick
+        if pseudo_rand < 0.001 { // 0.1% chance per tick (was 0.5%)
             let down = pos - IVec3::Y;
             if let Some(&neighbor) = voxel_world.blocks.get(&down) {
                 if let Ok(block_type) = block_type_query.get(neighbor) {
                     if [0, 1, 7].contains(&block_type.0) {
                         // Spawn Particles
                         if let Ok(mat_handle) = block_material_query.get(neighbor) {
-                            for i in 0..5 {
+                            for i in 0..3 { // Reduced from 5 to 3 particles
                                 let r1 = (down.x as f32 + i as f32 * 0.23).sin();
                                 let r2 = (down.y as f32 + i as f32 * 0.45).cos();
                                 let r3 = (down.z as f32 + i as f32 * 0.67).sin();
@@ -609,11 +675,11 @@ fn water_dynamics(
                 let pseudo_rand = (pos.x + pos.y + pos.z) as f32 + time.elapsed_seconds() * 10.0;
                 let do_split = (pseudo_rand as i32) % 2 == 0;
 
-                if do_split && liq.level > 1 {
+                if do_split && liq.level > 1 { // Only split if level > 1
                     let split = liq.level / 2;
                     if split > 0 {
                         liq.level -= split;
-                        
+
                         let height = split as f32 / 9.0;
                         let id = commands.spawn((
                             PbrBundle {
@@ -625,14 +691,14 @@ fn water_dynamics(
                             BlockType(4),
                             Liquid { level: split },
                         )).id();
-                        
+
                         voxel_world.blocks.insert(target, id);
                         let chunk_coord = IVec2::new(
                             (target.x as f32 / CHUNK_SIZE as f32).floor() as i32,
                             (target.z as f32 / CHUNK_SIZE as f32).floor() as i32,
                         );
                         voxel_world.chunks.entry(chunk_coord).or_default().push(target);
-                        
+
                         // Update neighbors (safely handle despawned entities)
                         for dir in [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z] {
                             if let Some(&e) = voxel_world.blocks.get(&(target + dir)) {
@@ -650,6 +716,8 @@ fn water_dynamics(
                 }
             }
         }
+
+        processed_count += 1;
     }
 
     // 3. Cleanup Empty Blocks
@@ -682,11 +750,19 @@ fn sand_dynamics(
     mut voxel_world: ResMut<VoxelWorld>,
     mut query: Query<(Entity, &mut Transform, &BlockType)>,
     time: Res<Time>,
-    mut timer: Local<f32>,
+    mut sand_update_timer: Local<Option<Timer>>,
 ) {
-    *timer += time.delta_seconds();
-    if *timer < 0.05 { return; }
-    *timer = 0.0;
+    // Initialize the timer if it hasn't been initialized yet
+    if sand_update_timer.is_none() {
+        *sand_update_timer = Some(Timer::from_seconds(0.016, TimerMode::Repeating)); // ~60 FPS update rate for better responsiveness
+    }
+
+    let timer = sand_update_timer.as_mut().unwrap();
+
+    // Only update sand dynamics periodically to reduce performance impact
+    if !timer.tick(time.delta()).just_finished() {
+        return;
+    }
 
     let mut sand_entities: Vec<(Entity, IVec3)> = query.iter()
         .filter(|(_, _, block_type)| block_type.0 == 7) // Sand is index 7
@@ -696,13 +772,14 @@ fn sand_dynamics(
         })
         .filter(|(e, pos)| voxel_world.blocks.get(pos) == Some(e))
         .collect();
-    
+
     // Sort by Y ascending so we process bottom blocks first
     sand_entities.sort_by_key(|(_, pos)| pos.y);
 
+    // Process all sand blocks for proper physics simulation
     for (entity, pos) in sand_entities {
         let down = pos - IVec3::Y;
-        
+
         let down_chunk = IVec2::new(
             (down.x as f32 / CHUNK_SIZE as f32).floor() as i32,
             (down.z as f32 / CHUNK_SIZE as f32).floor() as i32,
@@ -719,11 +796,11 @@ fn sand_dynamics(
         } else {
             // Try to slide down diagonals (piling effect)
             let directions = [IVec3::new(1, -1, 0), IVec3::new(-1, -1, 0), IVec3::new(0, -1, 1), IVec3::new(0, -1, -1)];
-            
+
             let time_offset = (time.elapsed_seconds() * 10.0) as i32;
             let pos_sum = pos.x.wrapping_add(pos.y).wrapping_add(pos.z);
             let offset = (time_offset.wrapping_add(pos_sum)).rem_euclid(4) as usize;
-            
+
             for i in 0..4 {
                 let dir = directions[(i + offset) % 4];
                 let target = pos + dir;

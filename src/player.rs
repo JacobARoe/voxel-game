@@ -94,7 +94,15 @@ fn move_player(
         for event in mouse_motion.read() {
             transform.rotate_y(-event.delta.x * sensitivity);
             if let Ok((mut camera_transform, _)) = camera_query.get_single_mut() {
-                camera_transform.rotate_local_x(-event.delta.y * sensitivity);
+                // Clamp vertical rotation to prevent looking past straight up/down
+                let mut rotation_x = camera_transform.rotation.to_euler(EulerRot::XYZ).0;
+                rotation_x -= event.delta.y * sensitivity;
+
+                // Limit vertical look to 90 degrees up and down (PI/2 radians)
+                rotation_x = rotation_x.clamp(-std::f32::consts::FRAC_PI_2 + 0.01, std::f32::consts::FRAC_PI_2 - 0.01);
+
+                // Apply the clamped rotation
+                camera_transform.rotation = Quat::from_rotation_x(rotation_x);
             }
         }
     }
