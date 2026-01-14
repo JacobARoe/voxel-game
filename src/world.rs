@@ -146,7 +146,6 @@ fn setup_world(
     
     // Generate 64 meshes for all face combinations (Greedy-ish meshing per block)
     // Bitmask: 1:+X, 2:-X, 4:+Y, 8:-Y, 16:+Z, 32:-Z
-    // Slightly smaller blocks (0.48 instead of 0.5) create thin gaps that act as borders
     let mut faces_meshes = Vec::new();
     for i in 0..64 {
         let mut positions = Vec::new();
@@ -155,7 +154,7 @@ fn setup_world(
         let mut indices = Vec::new();
         let mut v_idx = 0;
 
-        const S: f32 = 0.48; // Slightly smaller to create border gaps
+        const S: f32 = 0.5; // Full size to eliminate gaps
 
         let add_face = |pos: &mut Vec<[f32; 3]>, norm: &mut Vec<[f32; 3]>, uv: &mut Vec<[f32; 2]>, ind: &mut Vec<u32>, v: &mut u32, corners: [[f32; 3]; 4], normal: [f32; 3]| {
             pos.extend_from_slice(&corners);
@@ -188,7 +187,7 @@ fn setup_world(
 
     // Create wireframe mesh for block outlines (12 edges of a cube)
     let wireframe_mesh = {
-        const W: f32 = 0.501; // Slightly larger than block to prevent z-fighting
+        const W: f32 = 0.5; // Match the full block size
         let positions: Vec<[f32; 3]> = vec![
             // Bottom face edges
             [-W, -W, -W], [W, -W, -W],
@@ -325,7 +324,7 @@ fn update_chunks(
     player_query: Query<&Transform, With<Player>>,
 ) {
     let player_transform = player_query.single();
-    let render_distance = 3; // Reduced for better performance
+    let render_distance = 4; // Increased to prevent premature derendering at FOV edges
 
     // Calculate the chunk the player is currently in
     let player_chunk = IVec2::new(
@@ -398,11 +397,11 @@ fn update_chunks(
         }
     }
 
-    // Despawn chunks far away
+    // Despawn chunks far away (using a buffer to prevent flickering)
     let mut chunks_to_remove = Vec::new();
     for &chunk_coord in voxel_world.chunks.keys() {
         let dist = (chunk_coord - player_chunk).abs();
-        if dist.x > render_distance + 1 || dist.y > render_distance + 1 {
+        if dist.x > render_distance + 2 || dist.y > render_distance + 2 {
             chunks_to_remove.push(chunk_coord);
         }
     }
