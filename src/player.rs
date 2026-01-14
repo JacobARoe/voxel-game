@@ -5,6 +5,7 @@ use bevy::audio::Volume;
 use crate::mobs::SandSnake;
 use crate::ui::Inventory;
 use crate::ui::GameState;
+use rand::Rng;
 
 #[derive(Component)]
 pub struct Player {
@@ -67,7 +68,7 @@ fn setup_player(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut ma
 
 fn move_player(
     mut commands: Commands,
-    mut query: Query<(&mut Transform, &mut Player)>,
+    mut query: Query<(Entity, &mut Transform, &mut Player, &mut Health)>,
     mut camera_query: Query<(&mut Transform, &GlobalTransform), (With<MainCamera>, Without<Player>)>,
     keys: Res<ButtonInput<KeyCode>>,
     mut mouse_motion: EventReader<MouseMotion>,
@@ -77,6 +78,7 @@ fn move_player(
     voxel_world: Res<VoxelWorld>,
     voxel_sounds: Res<VoxelSounds>,
     block_type_query: Query<&BlockType>,
+    world_gen: Res<crate::world::WorldGen>,
 ) {
     let mut window = windows.single_mut();
 
@@ -86,7 +88,7 @@ fn move_player(
         window.cursor.grab_mode = bevy::window::CursorGrabMode::Locked;
     }
 
-    let (mut transform, mut player) = query.single_mut();
+    let (player_entity, mut transform, mut player, mut health) = query.single_mut();
 
     // Mouse Look
     if window.cursor.grab_mode == bevy::window::CursorGrabMode::Locked {
@@ -246,7 +248,19 @@ fn move_player(
 
     // Respawn if fell out of world
     if transform.translation.y < -30.0 {
-        transform.translation = Vec3::new(0.0, 10.0, 0.0);
+        // If player is still alive, respawn at a random location
+        let mut rng = rand::thread_rng();
+        let rand_x = (rng.gen_range(0.0..1.0) - 0.5) * 100.0; // Random between -50 and 50
+        let rand_z = (rng.gen_range(0.0..1.0) - 0.5) * 100.0; // Random between -50 and 50
+
+        // Calculate spawn height based on terrain generation at the random location
+        let (_, _, height) = crate::world::get_terrain_height(rand_x as i32, rand_z as i32, &world_gen.perlin);
+
+        transform.translation = Vec3::new(rand_x, height as f32 + 5.0, rand_z);
+
+        // Reset health when respawning due to falling
+        health.value = 100;
+        health.invulnerability_timer = Timer::from_seconds(2.0, TimerMode::Once);
     }
 
     // Camera collision detection - prevent camera from clipping into blocks
@@ -283,6 +297,11 @@ fn move_player(
                 }
             }
         }
+    }
+
+    // Check if player died (health <= 0) and trigger respawn if needed
+    if health.value <= 0 {
+        respawn_player(&mut commands, player_entity, &world_gen);
     }
 }
 
@@ -448,11 +467,13 @@ fn interact_terrain(
 }
 
 fn check_snake_collision(
-    mut player_query: Query<(&Transform, &mut Health, &mut Player)>,
+    mut commands: Commands,
+    mut player_query: Query<(Entity, &Transform, &mut Health, &mut Player)>,
     snake_query: Query<&Transform, With<SandSnake>>,
     time: Res<Time>,
+    world_gen: Res<crate::world::WorldGen>,
 ) {
-    if let Ok((player_transform, mut health, mut player)) = player_query.get_single_mut() {
+    if let Ok((player_entity, player_transform, mut health, mut player)) = player_query.get_single_mut() {
         health.invulnerability_timer.tick(time.delta());
 
         if !health.invulnerability_timer.finished() {
@@ -464,11 +485,39 @@ fn check_snake_collision(
                 health.value -= 10;
                 health.invulnerability_timer.reset();
                 info!("Player hit by snake! Health: {}", health.value);
-                
+
                 // Knockback
                 let dir = (player_transform.translation - snake_transform.translation).normalize_or_zero();
                 player.velocity += dir * 15.0 + Vec3::Y * 5.0;
+
+                // Check if player died
+                if health.value <= 0 {
+                    info!("Player died! Respawning...");
+                    respawn_player(&mut commands, player_entity, &world_gen);
+                }
             }
         }
     }
+}
+
+// Function to handle player respawn
+fn respawn_player(
+    commands: &mut Commands,
+    player_entity: Entity,
+    world_gen: &crate::world::WorldGen,
+) {
+    // Calculate a random spawn location
+    let mut rng = rand::thread_rng();
+    let rand_x = (rng.gen_range(0.0..1.0) - 0.5) * 100.0; // Random between -50 and 50
+    let rand_z = (rng.gen_range(0.0..1.0) - 0.5) * 100.0; // Random between -50 and 50
+
+    // Calculate spawn height based on terrain generation at the random location
+    let (_, _, height) = crate::world::get_terrain_height(rand_x as i32, rand_z as i32, &world_gen.perlin);
+
+    // Reset player position and health
+    commands.entity(player_entity).insert((
+        Transform::from_xyz(rand_x, height as f32 + 5.0, rand_z),
+        Health { value: 100, invulnerability_timer: Timer::from_seconds(2.0, TimerMode::Once) },
+        Player { velocity: Vec3::ZERO, flying: false, footstep_timer: 0.0 },
+    ));
 }
