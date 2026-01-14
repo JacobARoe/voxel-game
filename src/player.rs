@@ -186,7 +186,7 @@ fn move_player(
                 player.footstep_timer = 0.0;
                 commands.spawn(AudioBundle {
                     source: voxel_sounds.footstep.clone(),
-                    settings: PlaybackSettings::DESPAWN.with_volume(Volume::new(0.5)),
+                    settings: PlaybackSettings::DESPAWN.with_volume(Volume::new(1.0)),
                 });
             }
         }
@@ -376,14 +376,37 @@ fn interact_terrain(
                     commands.entity(entity).despawn_recursive();
                     commands.spawn(AudioBundle {
                         source: voxel_sounds.break_sound.clone(),
-                        settings: PlaybackSettings::DESPAWN,
+                        settings: PlaybackSettings::DESPAWN.with_volume(Volume::new(1.0)),
                     });
 
                     // Update neighbors (safely handle despawned entities)
+                    // When a block is removed, all 6 neighboring blocks need to update their meshes to show newly exposed faces
                     for dir in [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z] {
-                        if let Some(&e) = voxel_world.blocks.get(&(block_pos + dir)) {
+                        let neighbor_pos = block_pos + dir;
+                        if let Some(&e) = voxel_world.blocks.get(&neighbor_pos) {
                             if let Some(mut ec) = commands.get_entity(e) {
                                 ec.insert(NeedsMeshUpdate);
+                            }
+                        }
+                    }
+
+                    // Additionally, update neighbors of the removed block's neighbors to handle edge cases
+                    for dir in [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z] {
+                        let neighbor_pos = block_pos + dir;
+                        if let Some(&neighbor_entity) = voxel_world.blocks.get(&neighbor_pos) {
+                            // Update the neighbor itself (already done above, but let's make sure)
+                            if let Some(mut ec) = commands.get_entity(neighbor_entity) {
+                                ec.insert(NeedsMeshUpdate);
+                            }
+
+                            // Update the neighbor's neighbors to handle edge cases where they might also need updates
+                            for neighbor_dir in [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z] {
+                                let neighbor_neighbor_pos = neighbor_pos + neighbor_dir;
+                                if let Some(&nn_entity) = voxel_world.blocks.get(&neighbor_neighbor_pos) {
+                                    if let Some(mut ec) = commands.get_entity(nn_entity) {
+                                        ec.insert(NeedsMeshUpdate);
+                                    }
+                                }
                             }
                         }
                     }
@@ -438,7 +461,7 @@ fn interact_terrain(
                         voxel_world.blocks.insert(prev_pos, id);
                         commands.spawn(AudioBundle {
                             source: voxel_sounds.place.clone(),
-                            settings: PlaybackSettings::DESPAWN,
+                            settings: PlaybackSettings::DESPAWN.with_volume(Volume::new(1.0)),
                         });
                         
                         // Update neighbors (safely handle despawned entities)

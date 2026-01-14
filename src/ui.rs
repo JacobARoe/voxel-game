@@ -20,8 +20,8 @@ pub struct Inventory {
 impl Default for Inventory {
     fn default() -> Self {
         let mut items = HashMap::new();
-        // Start with 64 of each basic block type
-        for i in 0..10 { items.insert(i, 64); }
+        // Start with 64 of each basic block type (updated to include new block types)
+        for i in 0..25 { items.insert(i, 64); }
         Self {
             selected_slot: 0,
             items,
@@ -41,6 +41,9 @@ pub struct SelectedBlockText;
 pub struct HealthText;
 
 #[derive(Component)]
+pub struct TimeText;
+
+#[derive(Component)]
 pub struct PauseMenu;
 
 pub struct UiPlugin;
@@ -50,7 +53,7 @@ impl Plugin for UiPlugin {
         app.init_state::<GameState>()
             .insert_resource(Inventory::default())
             .add_systems(Startup, setup_ui)
-            .add_systems(Update, (inventory_input.run_if(in_state(GameState::Playing)), update_inventory_ui, update_health_ui, toggle_pause))
+            .add_systems(Update, (inventory_input.run_if(in_state(GameState::Playing)), update_inventory_ui, update_health_ui, update_time_ui, toggle_pause))
             .add_systems(OnEnter(GameState::Paused), spawn_pause_menu)
             .add_systems(OnExit(GameState::Paused), despawn_pause_menu);
     }
@@ -176,6 +179,25 @@ fn setup_ui(mut commands: Commands) {
             ..default()
         }),
         HealthText,
+    ));
+
+    // Time Text
+    commands.spawn((
+        TextBundle::from_section(
+            "Time: 06:00",
+            TextStyle {
+                font_size: 30.0,
+                color: Color::srgb(1.0, 1.0, 1.0),
+                ..default()
+            },
+        )
+        .with_style(Style {
+            position_type: PositionType::Absolute,
+            top: Val::Px(20.0),
+            right: Val::Px(20.0),
+            ..default()
+        }),
+        TimeText,
     ));
 }
 
@@ -316,5 +338,18 @@ fn update_health_ui(
         for mut text in text_query.iter_mut() {
             text.sections[0].value = format!("Health: {}", health.value);
         }
+    }
+}
+
+fn update_time_ui(
+    mut text_query: Query<&mut Text, With<TimeText>>,
+    day_night_cycle: Res<crate::DayNightCycle>,
+) {
+    // Convert game time (0.0-24.0) to hours and minutes
+    let hours = day_night_cycle.time.floor() as u32 % 24;
+    let minutes = ((day_night_cycle.time % 1.0) * 60.0).round() as u32;
+
+    for mut text in text_query.iter_mut() {
+        text.sections[0].value = format!("Time: {:02}:{:02}", hours, minutes);
     }
 }

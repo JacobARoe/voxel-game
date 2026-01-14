@@ -45,7 +45,7 @@ struct SavedBlock {
     level: u8,
 }
 
-#[derive(Resource)]
+#[derive(Resource, Clone)]
 pub struct VoxelAssets {
     pub mesh: Handle<Mesh>,
     pub water_meshes: Vec<Handle<Mesh>>,
@@ -104,10 +104,10 @@ impl Plugin for WorldPlugin {
 
 pub fn get_terrain_height(x: i32, z: i32, perlin: &Perlin) -> (i32, i32, i32) {
     let stone_noise = perlin.get([x as f64 * 0.1, z as f64 * 0.1]);
-    let stone_h = ((stone_noise * 0.5 + 0.5) * 10.0).clamp(0.0, 10.0).round() as i32;
-    
+    let stone_h = ((stone_noise * 0.3 + 0.3) * 6.0).clamp(0.0, 6.0).round() as i32; // Reduced from 10 to 6
+
     let dirt_noise = perlin.get([x as f64 * 0.1 + 100.0, z as f64 * 0.1 + 100.0]);
-    let dirt_h = ((dirt_noise * 0.5 + 0.5) * 10.0).clamp(0.0, 10.0).round() as i32;
+    let dirt_h = ((dirt_noise * 0.3 + 0.3) * 6.0).clamp(0.0, 6.0).round() as i32; // Reduced from 10 to 6
 
     (stone_h, dirt_h, -16 + stone_h + dirt_h)
 }
@@ -118,16 +118,6 @@ fn setup_world(
     mut materials: ResMut<Assets<StandardMaterial>>,
     asset_server: Res<AssetServer>,
 ) {
-    // Spawn a light - shadows disabled for performance
-    commands.spawn(DirectionalLightBundle {
-        directional_light: DirectionalLight {
-            shadows_enabled: false, // Disabled for significant performance boost
-            illuminance: 10000.0,
-            ..default()
-        },
-        transform: Transform::from_xyz(50.0, 50.0, 50.0).looking_at(Vec3::ZERO, Vec3::Y),
-        ..default()
-    });
 
     // Dark background plane - makes gaps between blocks appear as black outlines
     let dark_mat = materials.add(StandardMaterial {
@@ -237,12 +227,28 @@ fn setup_world(
     let source = materials.add(Color::srgb(0.0, 1.0, 1.0));
     let drain = materials.add(Color::srgb(0.2, 0.0, 0.0));
     let bedrock = materials.add(Color::srgb(0.1, 0.1, 0.1));
+    // Add new block types
+    let cobblestone = materials.add(Color::srgb(0.4, 0.4, 0.4));
+    let gravel = materials.add(Color::srgb(0.6, 0.6, 0.6));
+    let snow = materials.add(Color::srgb(0.9, 0.95, 1.0));
+    let clay = materials.add(Color::srgb(0.6, 0.6, 0.8));
+    let coal = materials.add(Color::srgb(0.2, 0.2, 0.2));
+    let iron = materials.add(Color::srgb(0.6, 0.5, 0.4));
+    let copper = materials.add(Color::srgb(0.8, 0.5, 0.3));
+    let gold = materials.add(Color::srgb(0.9, 0.8, 0.2));
+    let diamond = materials.add(Color::srgb(0.3, 0.8, 0.9));
+    let emerald = materials.add(Color::srgb(0.2, 0.9, 0.4));
+    let redstone = materials.add(Color::srgb(0.9, 0.2, 0.2));
+    let lapis = materials.add(Color::srgb(0.2, 0.3, 0.8));
+    let obsidian = materials.add(Color::srgb(0.2, 0.0, 0.3));
+    let moss_stone = materials.add(Color::srgb(0.3, 0.5, 0.3));
+    let brick = materials.add(Color::srgb(0.7, 0.3, 0.3));
     let snake_mat = materials.add(Color::srgb(0.2, 0.8, 0.2));
     let snake_mesh = meshes.add(Cuboid::new(0.5, 0.5, 0.9));
     let eye_mesh = meshes.add(Cuboid::new(0.05, 0.05, 0.05));
     let segment_mesh = meshes.add(Cuboid::new(0.4, 0.4, 0.4));
     let eye_mat = materials.add(Color::BLACK);
-    
+
     commands.insert_resource(VoxelAssets {
         mesh,
         water_meshes,
@@ -250,8 +256,21 @@ fn setup_world(
         wireframe_mesh,
         wireframe_material,
         _material: grass.clone(),
-        block_types: vec![grass, dirt, stone, wood, water, source, drain, sand, bedrock, snake_mat.clone(), snake_mat.clone()],
-        block_names: vec!["Grass".to_string(), "Dirt".to_string(), "Stone".to_string(), "Wood".to_string(), "Water".to_string(), "Water Source".to_string(), "Water Drain".to_string(), "Sand".to_string(), "Bedrock".to_string(), "Snake".to_string(), "Snake Segment".to_string()],
+        block_types: vec![
+            grass, dirt, stone, wood, water, source, drain, sand, bedrock,
+            cobblestone, gravel, snow, clay, coal, iron, copper, gold, diamond,
+            emerald, redstone, lapis, obsidian, moss_stone, brick, snake_mat.clone(), snake_mat.clone()
+        ],
+        block_names: vec![
+            "Grass".to_string(), "Dirt".to_string(), "Stone".to_string(), "Wood".to_string(),
+            "Water".to_string(), "Water Source".to_string(), "Water Drain".to_string(),
+            "Sand".to_string(), "Bedrock".to_string(), "Cobblestone".to_string(),
+            "Gravel".to_string(), "Snow".to_string(), "Clay".to_string(), "Coal".to_string(),
+            "Iron".to_string(), "Copper".to_string(), "Gold".to_string(), "Diamond".to_string(),
+            "Emerald".to_string(), "Redstone".to_string(), "Lapis".to_string(),
+            "Obsidian".to_string(), "Moss Stone".to_string(), "Brick".to_string(),
+            "Snake".to_string(), "Snake Segment".to_string()
+        ],
         snake_material: snake_mat,
         snake_mesh,
         eye_mesh,
@@ -370,22 +389,72 @@ fn update_chunks(
                         let world_x = chunk_coord.x * CHUNK_SIZE + bx;
                         let world_z = chunk_coord.y * CHUNK_SIZE + bz;
 
-                        // Layered generation
+                        // Enhanced layered generation with more variety
                         let (stone_h, _, height) = get_terrain_height(world_x, world_z, &world_gen.perlin);
+
+                        // Additional noise for surface features
+                        let surface_noise = world_gen.perlin.get([world_x as f64 * 0.02, world_z as f64 * 0.02]);
 
                         // Generate column from Bedrock up to Height
                         for y in -16..=height {
                             let pos = IVec3::new(world_x, y, world_z);
 
-                            // Determine Block Type
+                            // Additional noise for underground ore distribution (calculated per Y level)
+                            let ore_noise = world_gen.perlin.get([world_x as f64 * 0.05, y as f64 * 0.05, world_z as f64 * 0.05]);
+
+                            // Determine Block Type with more variety
                             let block_type_idx = if y == -16 {
                                 8 // Bedrock
                             } else if y <= -16 + stone_h {
-                                2 // Stone
-                            } else if y < height {
-                                if height <= 2 { 7 } else { 1 } // Sand or Dirt
+                                // Underground stone layer with ore veins
+                                if ore_noise > 0.8 && y < -5 {
+                                    // Coal ore in upper underground
+                                    13
+                                } else if ore_noise > 0.85 && y < -10 {
+                                    // Iron ore deeper underground
+                                    14
+                                } else if ore_noise > 0.9 && y < -12 {
+                                    // Copper ore deeper
+                                    15
+                                } else if ore_noise > 0.95 && y < -14 {
+                                    // Gold ore very deep
+                                    16
+                                } else if ore_noise > 0.98 && y < -15 {
+                                    // Diamond ore very rare and deep
+                                    17
+                                } else if ore_noise < -0.8 {
+                                    // Lapis lazuli ore
+                                    20
+                                } else if ore_noise < -0.7 && y > -10 {
+                                    // Redstone ore
+                                    19
+                                } else {
+                                    // Regular stone with some variation
+                                    if ore_noise > 0.5 { 9 } else { 2 } // Cobblestone or regular stone
+                                }
+                            } else if y == height {
+                                // Surface layer - determine by height and surface noise
+                                if height > 15 {
+                                    // High altitudes - snow
+                                    11
+                                } else if height > 10 {
+                                    // Mid-altitudes - moss stone or grass
+                                    if surface_noise > 0.3 { 22 } else { 0 } // Moss stone or grass
+                                } else if height <= 2 {
+                                    // Low areas near water level - sand or clay
+                                    if surface_noise > 0.2 { 7 } else { 12 } // Sand or clay
+                                } else {
+                                    // Regular surface - grass, dirt, or other
+                                    if surface_noise > 0.4 { 0 } else if surface_noise > 0.1 { 1 } else { 22 } // Grass, dirt, or moss stone
+                                }
+                            } else if y > height - 3 {
+                                // Subsurface - dirt, clay, gravel, etc.
+                                if surface_noise > 0.6 { 1 } // Dirt
+                                else if surface_noise < -0.6 { 10 } // Gravel
+                                else { 1 } // Mostly dirt
                             } else {
-                                if height <= 2 { 7 } else { 0 } // Sand or Grass
+                                // Deep underground - mostly stone
+                                2
                             };
 
                             if let Some(mat) = voxel_assets.block_types.get(block_type_idx) {
@@ -419,6 +488,76 @@ fn update_chunks(
                         }
                     }
                 }
+
+                // Add natural water pools in low-lying areas
+                // Check for potential pool locations in this chunk
+                for bx in 0..CHUNK_SIZE {
+                    for bz in 0..CHUNK_SIZE {
+                        let world_x = chunk_coord.x * CHUNK_SIZE + bx;
+                        let world_z = chunk_coord.y * CHUNK_SIZE + bz;
+
+                        // Calculate terrain height at this position
+                        let (_, _, height) = get_terrain_height(world_x, world_z, &world_gen.perlin);
+
+                        // Check if this is a low area surrounded by higher terrain (potential pool location)
+                        let mut surrounding_heights = Vec::new();
+                        for dx in -2..=2 {
+                            for dz in -2..=2 {
+                                if dx == 0 && dz == 0 { continue; } // Skip center
+                                let (_, _, neighbor_height) = get_terrain_height(world_x + dx, world_z + dz, &world_gen.perlin);
+                                surrounding_heights.push(neighbor_height);
+                            }
+                        }
+
+                        // Calculate average surrounding height
+                        let avg_surrounding_height: i32 = surrounding_heights.iter().sum::<i32>() / surrounding_heights.len() as i32;
+
+                        // If this is a low area compared to surroundings and not too high, add a water pool
+                        if height <= 2 && avg_surrounding_height > height + 1 && height < 5 {
+                            // Add water pool at this location
+                            let pool_center_x = world_x as f32;
+                            let pool_center_z = world_z as f32;
+
+                            // Create a small water pool (3x3 area typically)
+                            for px in -1..=1 {
+                                for pz in -1..=1 {
+                                    let pool_x = pool_center_x as i32 + px;
+                                    let pool_z = pool_center_z as i32 + pz;
+
+                                    // Calculate distance from center to make circular pool
+                                    let dist = ((px as f32).powi(2) + (pz as f32).powi(2)).sqrt();
+
+                                    // Only place water if within circular area and not too far from center
+                                    if dist <= 1.5 {
+                                        let pool_pos = IVec3::new(pool_x, height, pool_z);
+
+                                        // Remove any existing blocks at this position
+                                        if let Some(existing_entity) = voxel_world.blocks.remove(&pool_pos) {
+                                            commands.entity(existing_entity).despawn_recursive();
+                                        }
+
+                                        // Place water block
+                                        let water_id = commands.spawn((
+                                            PbrBundle {
+                                                mesh: voxel_assets.water_meshes[8].clone(), // Full water height
+                                                material: voxel_assets.block_types[4].clone(), // Water material
+                                                transform: Transform::from_xyz(pool_x as f32, height as f32, pool_z as f32),
+                                                ..default()
+                                            },
+                                            BlockType(4), // Water
+                                            Liquid { level: 9 }, // Full water level
+                                            NeedsMeshUpdate,
+                                        )).id();
+
+                                        voxel_world.blocks.insert(pool_pos, water_id);
+                                        chunk_blocks.push(pool_pos);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 voxel_world.chunks.insert(chunk_coord, chunk_blocks);
             }
         }
@@ -465,12 +604,21 @@ fn update_mesh_system(
         return;
     }
 
-    // Process only a limited number of blocks per frame to avoid frame drops
+    // Process blocks that need updates, with dynamic limits based on how many need updating
+    let total_needing_updates = query.iter().len();
     let mut processed_count = 0;
-    const MAX_UPDATES_PER_FRAME: usize = 50; // Limit updates per frame
+
+    // Increase the limit when there are many pending updates to ensure responsiveness
+    let max_updates_per_frame = if total_needing_updates > 100 {
+        150  // Higher limit when there are many pending updates
+    } else if total_needing_updates > 50 {
+        100  // Medium limit
+    } else {
+        50   // Standard limit
+    };
 
     for (entity, transform, block_type) in query.iter_mut() {
-        if processed_count >= MAX_UPDATES_PER_FRAME {
+        if processed_count >= max_updates_per_frame {
             break;
         }
 
@@ -748,6 +896,7 @@ fn water_dynamics(
 fn sand_dynamics(
     mut commands: Commands,
     mut voxel_world: ResMut<VoxelWorld>,
+    voxel_assets: Res<VoxelAssets>,
     mut query: Query<(Entity, &mut Transform, &BlockType)>,
     time: Res<Time>,
     mut sand_update_timer: Local<Option<Timer>>,
@@ -791,6 +940,9 @@ fn sand_dynamics(
                 if let Ok((_, mut transform, _)) = query.get_mut(entity) {
                     transform.translation.y -= 1.0;
                     update_voxel_map(&mut commands, &mut voxel_world, pos, down, entity);
+
+                    // Add visual feedback for sand movement
+                    spawn_sand_movement_particles(&mut commands, (*voxel_assets).clone(), pos.as_vec3());
                 }
             }
         } else {
@@ -814,12 +966,47 @@ fn sand_dynamics(
                         if let Ok((_, mut transform, _)) = query.get_mut(entity) {
                             transform.translation = target.as_vec3();
                             update_voxel_map(&mut commands, &mut voxel_world, pos, target, entity);
+
+                            // Add visual feedback for sand movement
+                            spawn_sand_movement_particles(&mut commands, (*voxel_assets).clone(), pos.as_vec3());
+
                             break;
                         }
                     }
                 }
             }
         }
+    }
+}
+
+// Function to spawn particles when sand blocks move
+fn spawn_sand_movement_particles(
+    commands: &mut Commands,
+    voxel_assets: VoxelAssets,
+    position: Vec3,
+) {
+    // Spawn a few particles to indicate sand movement
+    for i in 0..3 {
+        let r1 = (position.x + i as f32 * 0.23).sin();
+        let r2 = (position.y + i as f32 * 0.45).cos();
+        let r3 = (position.z + i as f32 * 0.67).sin();
+
+        commands.spawn((
+            PbrBundle {
+                mesh: voxel_assets.mesh.clone(),
+                material: voxel_assets.block_types[7].clone(), // Sand material
+                transform: Transform::from_xyz(
+                    position.x + 0.5 + r1 * 0.3,
+                    position.y + 0.5 + r2.abs() * 0.3,
+                    position.z + 0.5 + r3 * 0.3
+                ).with_scale(Vec3::splat(0.15)),
+                ..default()
+            },
+            Particle {
+                lifetime: Timer::from_seconds(0.3, TimerMode::Once),
+                velocity: Vec3::new(r1 * 1.0, r2.abs() * 2.0 + 1.0, r3 * 1.0),
+            }
+        ));
     }
 }
 
