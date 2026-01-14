@@ -146,6 +146,7 @@ fn setup_world(
     
     // Generate 64 meshes for all face combinations (Greedy-ish meshing per block)
     // Bitmask: 1:+X, 2:-X, 4:+Y, 8:-Y, 16:+Z, 32:-Z
+    // Full-size blocks (0.5) eliminate gaps between them
     let mut faces_meshes = Vec::new();
     for i in 0..64 {
         let mut positions = Vec::new();
