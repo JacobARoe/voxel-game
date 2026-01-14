@@ -35,6 +35,13 @@ pub struct WaterDrain;
 #[derive(Component)]
 pub struct NeedsMeshUpdate;
 
+#[derive(Component)]
+pub struct BlockDurability {
+    pub current_durability: f32,
+    pub max_durability: f32,
+    pub crack_level: u32, // 0-3 crack levels for visual effects
+}
+
 #[derive(Serialize, Deserialize)]
 struct SavedBlock {
     x: i32,
@@ -60,6 +67,8 @@ pub struct VoxelAssets {
     pub eye_mesh: Handle<Mesh>,
     pub eye_material: Handle<StandardMaterial>,
     pub segment_mesh: Handle<Mesh>,
+    // Materials for cracked blocks
+    pub cracked_block_types: Vec<Handle<StandardMaterial>>,
 }
 
 #[derive(Resource)]
@@ -97,6 +106,7 @@ impl Plugin for WorldPlugin {
                water_source_system,
                water_drain_system,
                sand_dynamics,
+               update_block_cracks,
            ).run_if(in_state(GameState::Playing)))
            .add_systems(PostUpdate, update_mesh_system);
     }
@@ -110,6 +120,36 @@ pub fn get_terrain_height(x: i32, z: i32, perlin: &Perlin) -> (i32, i32, i32) {
     let dirt_h = ((dirt_noise * 0.3 + 0.3) * 6.0).clamp(0.0, 6.0).round() as i32; // Reduced from 10 to 6
 
     (stone_h, dirt_h, -16 + stone_h + dirt_h)
+}
+
+fn get_block_durability(block_type: usize) -> f32 {
+    match block_type {
+        0 => 3.0,  // Grass - medium durability
+        1 => 2.0,  // Dirt - low durability
+        2 => 8.0,  // Stone - high durability
+        3 => 6.0,  // Wood - medium-high durability
+        4 => 0.0,  // Water - not breakable
+        5 => 0.0,  // Water Source - not breakable
+        6 => 0.0,  // Water Drain - not breakable
+        7 => 1.0,  // Sand - very low durability
+        8 => 20.0, // Bedrock - very high durability (practically unbreakable)
+        9 => 4.0,  // Cobblestone - high durability
+        10 => 2.0, // Gravel - low durability
+        11 => 1.0, // Snow - very low durability
+        12 => 3.0, // Clay - medium durability
+        13 => 6.0, // Coal - medium-high durability
+        14 => 7.0, // Iron - high durability
+        15 => 6.5, // Copper - high durability
+        16 => 8.0, // Gold - high durability
+        17 => 10.0,// Diamond - very high durability
+        18 => 5.0, // Emerald - high durability
+        19 => 4.0, // Redstone - medium durability
+        20 => 5.0, // Lapis - medium-high durability
+        21 => 9.0, // Obsidian - very high durability
+        22 => 5.0, // Moss Stone - medium durability
+        23 => 5.0, // Brick - medium durability
+        _ => 3.0,  // Default durability
+    }
 }
 
 fn setup_world(
@@ -215,10 +255,40 @@ fn setup_world(
         water_meshes.push(meshes.add(Cuboid::new(1.0, height, 1.0)));
     }
     let grass = materials.add(Color::srgb(0.3, 0.8, 0.3));
+    let grass_cracked = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.3, 0.8, 0.3),
+        perceptual_roughness: 0.9,
+        metallic: 0.1,
+        ..default()
+    });
     let dirt = materials.add(Color::srgb(0.8, 0.7, 0.6));
+    let dirt_cracked = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.8, 0.7, 0.6),
+        perceptual_roughness: 0.9,
+        metallic: 0.1,
+        ..default()
+    });
     let stone = materials.add(Color::srgb(0.5, 0.5, 0.5));
+    let stone_cracked = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.45, 0.45, 0.45),
+        perceptual_roughness: 0.95,
+        metallic: 0.1,
+        ..default()
+    });
     let wood = materials.add(Color::srgb(0.4, 0.2, 0.1));
+    let wood_cracked = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.35, 0.18, 0.09),
+        perceptual_roughness: 0.9,
+        metallic: 0.1,
+        ..default()
+    });
     let sand = materials.add(Color::srgb(0.9, 0.8, 0.5));
+    let sand_cracked = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.85, 0.75, 0.45),
+        perceptual_roughness: 0.9,
+        metallic: 0.1,
+        ..default()
+    });
     let water = materials.add(StandardMaterial {
         base_color: Color::srgba(0.0, 0.4, 0.8, 0.5),
         alpha_mode: AlphaMode::Blend,
@@ -227,22 +297,118 @@ fn setup_world(
     let source = materials.add(Color::srgb(0.0, 1.0, 1.0));
     let drain = materials.add(Color::srgb(0.2, 0.0, 0.0));
     let bedrock = materials.add(Color::srgb(0.1, 0.1, 0.1));
+    let bedrock_cracked = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.08, 0.08, 0.08),
+        perceptual_roughness: 0.95,
+        metallic: 0.1,
+        ..default()
+    });
     // Add new block types
     let cobblestone = materials.add(Color::srgb(0.4, 0.4, 0.4));
+    let cobblestone_cracked = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.35, 0.35, 0.35),
+        perceptual_roughness: 0.95,
+        metallic: 0.1,
+        ..default()
+    });
     let gravel = materials.add(Color::srgb(0.6, 0.6, 0.6));
+    let gravel_cracked = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.55, 0.55, 0.55),
+        perceptual_roughness: 0.9,
+        metallic: 0.1,
+        ..default()
+    });
     let snow = materials.add(Color::srgb(0.9, 0.95, 1.0));
+    let snow_cracked = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.85, 0.9, 0.95),
+        perceptual_roughness: 0.9,
+        metallic: 0.1,
+        ..default()
+    });
     let clay = materials.add(Color::srgb(0.6, 0.6, 0.8));
+    let clay_cracked = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.55, 0.55, 0.75),
+        perceptual_roughness: 0.9,
+        metallic: 0.1,
+        ..default()
+    });
     let coal = materials.add(Color::srgb(0.2, 0.2, 0.2));
+    let coal_cracked = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.18, 0.18, 0.18),
+        perceptual_roughness: 0.9,
+        metallic: 0.1,
+        ..default()
+    });
     let iron = materials.add(Color::srgb(0.6, 0.5, 0.4));
+    let iron_cracked = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.55, 0.45, 0.35),
+        perceptual_roughness: 0.9,
+        metallic: 0.15,
+        ..default()
+    });
     let copper = materials.add(Color::srgb(0.8, 0.5, 0.3));
+    let copper_cracked = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.75, 0.45, 0.28),
+        perceptual_roughness: 0.9,
+        metallic: 0.15,
+        ..default()
+    });
     let gold = materials.add(Color::srgb(0.9, 0.8, 0.2));
+    let gold_cracked = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.85, 0.75, 0.18),
+        perceptual_roughness: 0.9,
+        metallic: 0.2,
+        ..default()
+    });
     let diamond = materials.add(Color::srgb(0.3, 0.8, 0.9));
+    let diamond_cracked = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.28, 0.75, 0.85),
+        perceptual_roughness: 0.85,
+        metallic: 0.15,
+        ..default()
+    });
     let emerald = materials.add(Color::srgb(0.2, 0.9, 0.4));
+    let emerald_cracked = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.18, 0.85, 0.35),
+        perceptual_roughness: 0.85,
+        metallic: 0.15,
+        ..default()
+    });
     let redstone = materials.add(Color::srgb(0.9, 0.2, 0.2));
+    let redstone_cracked = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.85, 0.18, 0.18),
+        perceptual_roughness: 0.9,
+        metallic: 0.1,
+        ..default()
+    });
     let lapis = materials.add(Color::srgb(0.2, 0.3, 0.8));
+    let lapis_cracked = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.18, 0.25, 0.75),
+        perceptual_roughness: 0.9,
+        metallic: 0.1,
+        ..default()
+    });
     let obsidian = materials.add(Color::srgb(0.2, 0.0, 0.3));
+    let obsidian_cracked = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.18, 0.0, 0.25),
+        perceptual_roughness: 0.95,
+        metallic: 0.2,
+        ..default()
+    });
     let moss_stone = materials.add(Color::srgb(0.3, 0.5, 0.3));
+    let moss_stone_cracked = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.28, 0.45, 0.28),
+        perceptual_roughness: 0.9,
+        metallic: 0.1,
+        ..default()
+    });
     let brick = materials.add(Color::srgb(0.7, 0.3, 0.3));
+    let brick_cracked = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.65, 0.28, 0.28),
+        perceptual_roughness: 0.9,
+        metallic: 0.1,
+        ..default()
+    });
     let snake_mat = materials.add(Color::srgb(0.2, 0.8, 0.2));
     let snake_mesh = meshes.add(Cuboid::new(0.5, 0.5, 0.9));
     let eye_mesh = meshes.add(Cuboid::new(0.05, 0.05, 0.05));
@@ -257,9 +423,15 @@ fn setup_world(
         wireframe_material,
         _material: grass.clone(),
         block_types: vec![
-            grass, dirt, stone, wood, water, source, drain, sand, bedrock,
+            grass, dirt, stone, wood, water.clone(), source.clone(), drain.clone(), sand, bedrock,
             cobblestone, gravel, snow, clay, coal, iron, copper, gold, diamond,
             emerald, redstone, lapis, obsidian, moss_stone, brick, snake_mat.clone(), snake_mat.clone()
+        ],
+        // Create cracked versions of all block types
+        cracked_block_types: vec![
+            grass_cracked, dirt_cracked, stone_cracked, wood_cracked, water.clone(), source.clone(), drain.clone(), sand_cracked, bedrock_cracked,
+            cobblestone_cracked, gravel_cracked, snow_cracked, clay_cracked, coal_cracked, iron_cracked, copper_cracked, gold_cracked, diamond_cracked,
+            emerald_cracked, redstone_cracked, lapis_cracked, obsidian_cracked, moss_stone_cracked, brick_cracked, snake_mat.clone(), snake_mat.clone()
         ],
         block_names: vec![
             "Grass".to_string(), "Dirt".to_string(), "Stone".to_string(), "Wood".to_string(),
@@ -459,15 +631,29 @@ fn update_chunks(
 
                             if let Some(mat) = voxel_assets.block_types.get(block_type_idx) {
                                 // All blocks have shadow casting disabled for performance
+                                let durability = get_block_durability(block_type_idx);
+                                // Select material based on crack level (initially 0)
+                                let block_material = if block_type_idx < voxel_assets.block_types.len() && block_type_idx < voxel_assets.cracked_block_types.len() {
+                                    // For now, use the regular material for initial blocks
+                                    voxel_assets.block_types[block_type_idx].clone()
+                                } else {
+                                    mat.clone()
+                                };
+
                                 let id = commands.spawn((
                                     PbrBundle {
                                         mesh: voxel_assets.mesh.clone(),
-                                        material: mat.clone(),
+                                        material: block_material,
                                         transform: Transform::from_xyz(world_x as f32, y as f32, world_z as f32),
                                         ..default()
                                     },
                                     BlockType(block_type_idx),
                                     NeedsMeshUpdate,
+                                    BlockDurability {
+                                        current_durability: durability,
+                                        max_durability: durability,
+                                        crack_level: 0,
+                                    },
                                     NotShadowCaster,
                                 )).with_children(|parent| {
                                     // Wireframe outline child - only add for visible blocks
@@ -1007,6 +1193,45 @@ fn spawn_sand_movement_particles(
                 velocity: Vec3::new(r1 * 1.0, r2.abs() * 2.0 + 1.0, r3 * 1.0),
             }
         ));
+    }
+}
+
+fn update_block_cracks(
+    mut commands: Commands,
+    mut query: Query<(Entity, &BlockType, &BlockDurability), Changed<BlockDurability>>,
+    voxel_assets: Res<VoxelAssets>,
+    mut material_query: Query<&mut Handle<StandardMaterial>>,
+) {
+    for (entity, block_type, durability) in query.iter_mut() {
+        // Only update blocks that have durability and can be damaged
+        if durability.max_durability > 0.0 {
+            // Determine which material to use based on crack level
+            let material_to_use = if durability.crack_level > 0 {
+                // Use cracked material if crack level > 0
+                if block_type.0 < voxel_assets.cracked_block_types.len() {
+                    voxel_assets.cracked_block_types[block_type.0].clone()
+                } else {
+                    // Fallback to original material if no cracked version exists
+                    if block_type.0 < voxel_assets.block_types.len() {
+                        voxel_assets.block_types[block_type.0].clone()
+                    } else {
+                        continue; // Skip if invalid block type
+                    }
+                }
+            } else {
+                // Use original material if no cracks
+                if block_type.0 < voxel_assets.block_types.len() {
+                    voxel_assets.block_types[block_type.0].clone()
+                } else {
+                    continue; // Skip if invalid block type
+                }
+            };
+
+            // Update the material of the block
+            if let Ok(mut material_handle) = material_query.get_mut(entity) {
+                *material_handle = material_to_use;
+            }
+        }
     }
 }
 

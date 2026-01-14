@@ -316,6 +316,7 @@ fn interact_terrain(
     window_query: Query<&Window>,
     block_material_query: Query<&Handle<StandardMaterial>>,
     block_type_query: Query<&BlockType>,
+    mut block_durability_query: Query<&mut crate::world::BlockDurability>,
 ) {
     let window = window_query.single();
     if window.cursor.grab_mode != bevy::window::CursorGrabMode::Locked {
@@ -337,74 +338,186 @@ fn interact_terrain(
 
         if voxel_world.blocks.contains_key(&block_pos) {
             if mouse_buttons.just_pressed(MouseButton::Left) {
-                // Check for Bedrock (Index 8)
                 if let Some(&entity) = voxel_world.blocks.get(&block_pos) {
-                    if let Ok(block_type) = block_type_query.get(entity) {
-                        if block_type.0 == 8 { continue; }
-                        // Add to inventory
-                        *inventory.items.entry(block_type.0).or_insert(0) += 1;
-                    }
-                }
+                    // Check if the block has durability component
+                    if let Ok(mut durability) = block_durability_query.get_mut(entity) {
+                        // Only process blocks that have durability (not water, sources, etc.)
+                        if durability.max_durability > 0.0 {
+                            // Damage the block
+                            durability.current_durability -= 1.0; // Each hit does 1.0 damage
 
-                if let Some(entity) = voxel_world.blocks.remove(&block_pos) {
-                    // Spawn Particles
-                    if let Ok(mat_handle) = block_material_query.get(entity) {
-                        for i in 0..8 {
-                            let r1 = (block_pos.x as f32 + i as f32 * 0.23).sin();
-                            let r2 = (block_pos.y as f32 + i as f32 * 0.45).cos();
-                            let r3 = (block_pos.z as f32 + i as f32 * 0.67).sin();
-                            
-                            commands.spawn((
-                                PbrBundle {
-                                    mesh: voxel_assets.mesh.clone(),
-                                    material: mat_handle.clone(),
-                                    transform: Transform::from_xyz(
-                                        block_pos.x as f32 + r1 * 0.5, 
-                                        block_pos.y as f32 + r2.abs() * 0.5, 
-                                        block_pos.z as f32 + r3 * 0.5
-                                    ).with_scale(Vec3::splat(0.2)),
-                                    ..default()
-                                },
-                                Particle {
-                                    lifetime: Timer::from_seconds(0.5 + r1.abs() * 0.3, TimerMode::Once),
-                                    velocity: Vec3::new(r1 * 4.0, r2.abs() * 5.0 + 2.0, r3 * 4.0),
+                            // Calculate crack level based on remaining durability
+                            let crack_percentage = durability.current_durability / durability.max_durability;
+                            let new_crack_level = if crack_percentage < 0.25 {
+                                3  // Very damaged
+                            } else if crack_percentage < 0.5 {
+                                2  // Moderately damaged
+                            } else if crack_percentage < 0.75 {
+                                1  // Slightly damaged
+                            } else {
+                                0  // No cracks
+                            };
+
+                            // Only update if crack level changed
+                            if durability.crack_level != new_crack_level {
+                                durability.crack_level = new_crack_level;
+                                // Add mesh update to refresh visual appearance
+                                commands.entity(entity).insert(NeedsMeshUpdate);
+                            }
+
+                            // Play hit sound
+                            commands.spawn(AudioBundle {
+                                source: voxel_sounds.break_sound.clone(),
+                                settings: PlaybackSettings::DESPAWN.with_volume(Volume::new(0.3)), // Quieter hit sound
+                            });
+
+                            // Check if block should be destroyed
+                            if durability.current_durability <= 0.0 {
+                                // Remove the block completely
+                                if let Some(entity) = voxel_world.blocks.remove(&block_pos) {
+                                    // Check block type for inventory addition
+                                    if let Ok(block_type) = block_type_query.get(entity) {
+                                        // Don't add water, sources, or drains to inventory
+                                        if ![4, 5, 6].contains(&block_type.0) {
+                                            *inventory.items.entry(block_type.0).or_insert(0) += 1;
+                                        }
+                                    }
+
+                                    // Spawn Particles
+                                    if let Ok(mat_handle) = block_material_query.get(entity) {
+                                        for i in 0..8 {
+                                            let r1 = (block_pos.x as f32 + i as f32 * 0.23).sin();
+                                            let r2 = (block_pos.y as f32 + i as f32 * 0.45).cos();
+                                            let r3 = (block_pos.z as f32 + i as f32 * 0.67).sin();
+
+                                            commands.spawn((
+                                                PbrBundle {
+                                                    mesh: voxel_assets.mesh.clone(),
+                                                    material: mat_handle.clone(),
+                                                    transform: Transform::from_xyz(
+                                                        block_pos.x as f32 + r1 * 0.5,
+                                                        block_pos.y as f32 + r2.abs() * 0.5,
+                                                        block_pos.z as f32 + r3 * 0.5
+                                                    ).with_scale(Vec3::splat(0.2)),
+                                                    ..default()
+                                                },
+                                                Particle {
+                                                    lifetime: Timer::from_seconds(0.5 + r1.abs() * 0.3, TimerMode::Once),
+                                                    velocity: Vec3::new(r1 * 4.0, r2.abs() * 5.0 + 2.0, r3 * 4.0),
+                                                }
+                                            ));
+                                        }
+                                    }
+
+                                    commands.entity(entity).despawn_recursive();
+                                    commands.spawn(AudioBundle {
+                                        source: voxel_sounds.break_sound.clone(),
+                                        settings: PlaybackSettings::DESPAWN.with_volume(Volume::new(1.0)), // Louder break sound
+                                    });
+
+                                    // Update neighbors (safely handle despawned entities)
+                                    // When a block is removed, all 6 neighboring blocks need to update their meshes to show newly exposed faces
+                                    for dir in [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z] {
+                                        let neighbor_pos = block_pos + dir;
+                                        if let Some(&e) = voxel_world.blocks.get(&neighbor_pos) {
+                                            if let Some(mut ec) = commands.get_entity(e) {
+                                                ec.insert(NeedsMeshUpdate);
+                                            }
+                                        }
+                                    }
+
+                                    // Additionally, update neighbors of the removed block's neighbors to handle edge cases
+                                    for dir in [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z] {
+                                        let neighbor_pos = block_pos + dir;
+                                        if let Some(&neighbor_entity) = voxel_world.blocks.get(&neighbor_pos) {
+                                            // Update the neighbor itself (already done above, but let's make sure)
+                                            if let Some(mut ec) = commands.get_entity(neighbor_entity) {
+                                                ec.insert(NeedsMeshUpdate);
+                                            }
+
+                                            // Update the neighbor's neighbors to handle edge cases where they might also need updates
+                                            for neighbor_dir in [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z] {
+                                                let neighbor_neighbor_pos = neighbor_pos + neighbor_dir;
+                                                if let Some(&nn_entity) = voxel_world.blocks.get(&neighbor_neighbor_pos) {
+                                                    if let Some(mut ec) = commands.get_entity(nn_entity) {
+                                                        ec.insert(NeedsMeshUpdate);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
-                            ));
-                        }
-                    }
-
-                    commands.entity(entity).despawn_recursive();
-                    commands.spawn(AudioBundle {
-                        source: voxel_sounds.break_sound.clone(),
-                        settings: PlaybackSettings::DESPAWN.with_volume(Volume::new(1.0)),
-                    });
-
-                    // Update neighbors (safely handle despawned entities)
-                    // When a block is removed, all 6 neighboring blocks need to update their meshes to show newly exposed faces
-                    for dir in [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z] {
-                        let neighbor_pos = block_pos + dir;
-                        if let Some(&e) = voxel_world.blocks.get(&neighbor_pos) {
-                            if let Some(mut ec) = commands.get_entity(e) {
-                                ec.insert(NeedsMeshUpdate);
                             }
                         }
-                    }
+                    } else {
+                        // For blocks without durability (water, etc.), handle normally
+                        if let Ok(block_type) = block_type_query.get(entity) {
+                            if block_type.0 == 8 { continue; } // Skip bedrock
+                            // Add to inventory
+                            *inventory.items.entry(block_type.0).or_insert(0) += 1;
+                        }
 
-                    // Additionally, update neighbors of the removed block's neighbors to handle edge cases
-                    for dir in [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z] {
-                        let neighbor_pos = block_pos + dir;
-                        if let Some(&neighbor_entity) = voxel_world.blocks.get(&neighbor_pos) {
-                            // Update the neighbor itself (already done above, but let's make sure)
-                            if let Some(mut ec) = commands.get_entity(neighbor_entity) {
-                                ec.insert(NeedsMeshUpdate);
+                        if let Some(entity) = voxel_world.blocks.remove(&block_pos) {
+                            // Spawn Particles
+                            if let Ok(mat_handle) = block_material_query.get(entity) {
+                                for i in 0..8 {
+                                    let r1 = (block_pos.x as f32 + i as f32 * 0.23).sin();
+                                    let r2 = (block_pos.y as f32 + i as f32 * 0.45).cos();
+                                    let r3 = (block_pos.z as f32 + i as f32 * 0.67).sin();
+
+                                    commands.spawn((
+                                        PbrBundle {
+                                            mesh: voxel_assets.mesh.clone(),
+                                            material: mat_handle.clone(),
+                                            transform: Transform::from_xyz(
+                                                block_pos.x as f32 + r1 * 0.5,
+                                                block_pos.y as f32 + r2.abs() * 0.5,
+                                                block_pos.z as f32 + r3 * 0.5
+                                            ).with_scale(Vec3::splat(0.2)),
+                                            ..default()
+                                        },
+                                        Particle {
+                                            lifetime: Timer::from_seconds(0.5 + r1.abs() * 0.3, TimerMode::Once),
+                                            velocity: Vec3::new(r1 * 4.0, r2.abs() * 5.0 + 2.0, r3 * 4.0),
+                                        }
+                                    ));
+                                }
                             }
 
-                            // Update the neighbor's neighbors to handle edge cases where they might also need updates
-                            for neighbor_dir in [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z] {
-                                let neighbor_neighbor_pos = neighbor_pos + neighbor_dir;
-                                if let Some(&nn_entity) = voxel_world.blocks.get(&neighbor_neighbor_pos) {
-                                    if let Some(mut ec) = commands.get_entity(nn_entity) {
+                            commands.entity(entity).despawn_recursive();
+                            commands.spawn(AudioBundle {
+                                source: voxel_sounds.break_sound.clone(),
+                                settings: PlaybackSettings::DESPAWN.with_volume(Volume::new(1.0)),
+                            });
+
+                            // Update neighbors (safely handle despawned entities)
+                            // When a block is removed, all 6 neighboring blocks need to update their meshes to show newly exposed faces
+                            for dir in [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z] {
+                                let neighbor_pos = block_pos + dir;
+                                if let Some(&e) = voxel_world.blocks.get(&neighbor_pos) {
+                                    if let Some(mut ec) = commands.get_entity(e) {
                                         ec.insert(NeedsMeshUpdate);
+                                    }
+                                }
+                            }
+
+                            // Additionally, update neighbors of the removed block's neighbors to handle edge cases
+                            for dir in [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z] {
+                                let neighbor_pos = block_pos + dir;
+                                if let Some(&neighbor_entity) = voxel_world.blocks.get(&neighbor_pos) {
+                                    // Update the neighbor itself (already done above, but let's make sure)
+                                    if let Some(mut ec) = commands.get_entity(neighbor_entity) {
+                                        ec.insert(NeedsMeshUpdate);
+                                    }
+
+                                    // Update the neighbor's neighbors to handle edge cases where they might also need updates
+                                    for neighbor_dir in [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z] {
+                                        let neighbor_neighbor_pos = neighbor_pos + neighbor_dir;
+                                        if let Some(&nn_entity) = voxel_world.blocks.get(&neighbor_neighbor_pos) {
+                                            if let Some(mut ec) = commands.get_entity(nn_entity) {
+                                                ec.insert(NeedsMeshUpdate);
+                                            }
+                                        }
                                     }
                                 }
                             }
