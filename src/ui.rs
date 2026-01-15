@@ -8,6 +8,32 @@ pub enum GameState {
     #[default]
     Playing,
     Paused,
+    Crafting,
+}
+
+#[derive(Resource)]
+pub struct SnakeSettings {
+    pub enabled: bool,
+}
+
+impl Default for SnakeSettings {
+    fn default() -> Self {
+        Self { enabled: false }
+    }
+}
+
+#[derive(Component)]
+pub struct SnakeToggleButton;
+
+#[derive(Component)]
+pub struct CraftingMenu;
+
+#[derive(Component)]
+pub struct CraftButton {
+    pub input: usize,
+    pub input_count: u32,
+    pub output: usize,
+    pub output_count: u32,
 }
 
 #[derive(Resource)]
@@ -48,10 +74,13 @@ impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
         app.init_state::<GameState>()
             .insert_resource(Inventory::default())
+            .insert_resource(SnakeSettings::default())
             .add_systems(Startup, setup_ui)
-            .add_systems(Update, (inventory_input.run_if(in_state(GameState::Playing)), update_inventory_ui, update_health_ui, toggle_pause))
+            .add_systems(Update, (inventory_input.run_if(in_state(GameState::Playing)), update_inventory_ui, update_health_ui, toggle_pause, toggle_crafting, handle_snake_toggle, handle_crafting_click))
             .add_systems(OnEnter(GameState::Paused), spawn_pause_menu)
-            .add_systems(OnExit(GameState::Paused), despawn_pause_menu);
+            .add_systems(OnExit(GameState::Paused), despawn_pause_menu)
+            .add_systems(OnEnter(GameState::Crafting), spawn_crafting_menu)
+            .add_systems(OnExit(GameState::Crafting), despawn_crafting_menu);
     }
 }
 
@@ -233,6 +262,30 @@ fn update_inventory_ui(
     }
 }
 
+fn toggle_crafting(
+    mut next_state: ResMut<NextState<GameState>>,
+    state: Res<State<GameState>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut windows: Query<&mut Window>,
+) {
+    if keys.just_pressed(KeyCode::KeyC) {
+        let mut window = windows.single_mut();
+        match state.get() {
+            GameState::Playing => {
+                next_state.set(GameState::Crafting);
+                window.cursor.visible = true;
+                window.cursor.grab_mode = bevy::window::CursorGrabMode::None;
+            },
+            GameState::Crafting => {
+                next_state.set(GameState::Playing);
+                window.cursor.visible = false;
+                window.cursor.grab_mode = bevy::window::CursorGrabMode::Locked;
+            },
+            _ => {}
+        }
+    }
+}
+
 fn toggle_pause(
     mut next_state: ResMut<NextState<GameState>>,
     state: Res<State<GameState>>,
@@ -251,12 +304,17 @@ fn toggle_pause(
                 next_state.set(GameState::Playing);
                 window.cursor.visible = false;
                 window.cursor.grab_mode = bevy::window::CursorGrabMode::Locked;
+            },
+            GameState::Crafting => {
+                next_state.set(GameState::Playing);
+                window.cursor.visible = false;
+                window.cursor.grab_mode = bevy::window::CursorGrabMode::Locked;
             }
         }
     }
 }
 
-fn spawn_pause_menu(mut commands: Commands) {
+fn spawn_pause_menu(mut commands: Commands, snake_settings: Res<SnakeSettings>) {
     commands.spawn((
         NodeBundle {
             style: Style {
@@ -264,6 +322,7 @@ fn spawn_pause_menu(mut commands: Commands) {
                 height: Val::Percent(100.0),
                 align_items: AlignItems::Center,
                 justify_content: JustifyContent::Center,
+                flex_direction: FlexDirection::Column,
                 position_type: PositionType::Absolute,
                 ..default()
             },
@@ -281,12 +340,144 @@ fn spawn_pause_menu(mut commands: Commands) {
                 ..default()
             },
         ));
+        
+        // Snake Toggle Button
+        parent.spawn((
+            ButtonBundle {
+                style: Style {
+                    width: Val::Px(250.0),
+                    height: Val::Px(60.0),
+                    margin: UiRect::top(Val::Px(20.0)),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    ..default()
+                },
+                background_color: Color::srgb(0.2, 0.2, 0.2).into(),
+                ..default()
+            },
+            SnakeToggleButton,
+        )).with_children(|btn| {
+            let text = if snake_settings.enabled { "Snakes: ON" } else { "Snakes: OFF" };
+            btn.spawn(TextBundle::from_section(
+                text,
+                TextStyle { font_size: 30.0, color: Color::WHITE, ..default() }
+            ));
+        });
     });
 }
 
 fn despawn_pause_menu(mut commands: Commands, query: Query<Entity, With<PauseMenu>>) {
     for entity in query.iter() {
         commands.entity(entity).despawn_recursive();
+    }
+}
+
+fn handle_snake_toggle(
+    mut interaction_query: Query<(&Interaction, &Children), (Changed<Interaction>, With<SnakeToggleButton>)>,
+    mut text_query: Query<&mut Text>,
+    mut snake_settings: ResMut<SnakeSettings>,
+) {
+    for (interaction, children) in interaction_query.iter_mut() {
+        if *interaction == Interaction::Pressed {
+            snake_settings.enabled = !snake_settings.enabled;
+            if let Ok(mut text) = text_query.get_mut(children[0]) {
+                text.sections[0].value = format!("Snakes: {}", if snake_settings.enabled { "ON" } else { "OFF" });
+            }
+        }
+    }
+}
+
+fn spawn_crafting_menu(mut commands: Commands, voxel_assets: Res<VoxelAssets>) {
+    commands.spawn((
+        NodeBundle {
+            style: Style {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                flex_direction: FlexDirection::Column,
+                position_type: PositionType::Absolute,
+                ..default()
+            },
+            background_color: Color::srgba(0.0, 0.0, 0.0, 0.8).into(),
+            z_index: ZIndex::Global(10),
+            ..default()
+        },
+        CraftingMenu,
+    )).with_children(|parent| {
+        parent.spawn(TextBundle::from_section(
+            "CRAFTING (Press C to Close)",
+            TextStyle {
+                font_size: 40.0,
+                color: Color::WHITE,
+                ..default()
+            },
+        ));
+
+        let recipes = vec![
+            (1, 2, 0, 1), // 2 Dirt -> 1 Grass
+            (2, 2, 7, 1), // 2 Stone -> 1 Sand
+            (7, 2, 1, 1), // 2 Sand -> 1 Dirt
+            (3, 1, 11, 4), // 1 Wood -> 4 Leaves
+        ];
+
+        for (in_idx, in_count, out_idx, out_count) in recipes {
+             let in_name = voxel_assets.block_names.get(in_idx).unwrap_or(&"?".to_string()).clone();
+             let out_name = voxel_assets.block_names.get(out_idx).unwrap_or(&"?".to_string()).clone();
+             
+             parent.spawn((
+                ButtonBundle {
+                    style: Style {
+                        width: Val::Px(400.0),
+                        height: Val::Px(50.0),
+                        margin: UiRect::all(Val::Px(5.0)),
+                        justify_content: JustifyContent::Center,
+                        align_items: AlignItems::Center,
+                        ..default()
+                    },
+                    background_color: Color::srgb(0.3, 0.3, 0.3).into(),
+                    ..default()
+                },
+                CraftButton { input: in_idx, input_count: in_count, output: out_idx, output_count: out_count },
+             )).with_children(|btn| {
+                 btn.spawn(TextBundle::from_section(
+                     format!("{} {} -> {} {}", in_count, in_name, out_count, out_name),
+                     TextStyle { font_size: 20.0, color: Color::WHITE, ..default() }
+                 ));
+             });
+        }
+    });
+}
+
+fn despawn_crafting_menu(mut commands: Commands, query: Query<Entity, With<CraftingMenu>>) {
+    for entity in query.iter() {
+        commands.entity(entity).despawn_recursive();
+    }
+}
+
+fn handle_crafting_click(
+    mut interaction_query: Query<(&Interaction, &CraftButton, &mut BackgroundColor), (Changed<Interaction>, With<CraftButton>)>,
+    mut inventory: ResMut<Inventory>,
+) {
+    for (interaction, recipe, mut bg) in interaction_query.iter_mut() {
+        match *interaction {
+            Interaction::Pressed => {
+                let has_count = *inventory.items.get(&recipe.input).unwrap_or(&0);
+                if has_count >= recipe.input_count {
+                    *inventory.items.entry(recipe.input).or_insert(0) -= recipe.input_count;
+                    *inventory.items.entry(recipe.output).or_insert(0) += recipe.output_count;
+                    bg.0 = Color::srgb(0.2, 0.8, 0.2).into(); // Flash green
+                } else {
+                    bg.0 = Color::srgb(0.8, 0.2, 0.2).into(); // Flash red
+                }
+            },
+            Interaction::Hovered => {
+                bg.0 = Color::srgb(0.4, 0.4, 0.4).into();
+            },
+            Interaction::None => {
+                bg.0 = Color::srgb(0.3, 0.3, 0.3).into();
+            }
+        }
     }
 }
 

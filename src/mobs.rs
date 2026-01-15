@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use crate::world::{VoxelWorld, VoxelAssets, BlockType, NeedsMeshUpdate, Particle, CHUNK_SIZE, update_voxel_map};
 use crate::player::Player;
-use crate::ui::GameState;
+use crate::ui::{GameState, SnakeSettings};
 
 #[derive(Component)]
 pub struct SandSnake {
@@ -15,7 +15,7 @@ pub struct MobsPlugin;
 
 impl Plugin for MobsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (spawn_snakes, sand_snake_ai).run_if(in_state(GameState::Playing)));
+        app.add_systems(Update, (spawn_snakes, sand_snake_ai, despawn_snakes_if_disabled).run_if(in_state(GameState::Playing)));
     }
 }
 
@@ -24,7 +24,9 @@ fn spawn_snakes(
     query: Query<&SandSnake>,
     mut voxel_world: ResMut<VoxelWorld>,
     voxel_assets: Res<VoxelAssets>,
+    snake_settings: Res<SnakeSettings>,
 ) {
+    if !snake_settings.enabled { return; }
     if query.iter().count() < 3 {
         let pos = IVec3::new(0, 20, 0);
         let chunk_coord = IVec2::new(0, 0);
@@ -80,6 +82,18 @@ fn spawn_snakes(
              }).id();
              voxel_world.blocks.insert(pos, id);
              voxel_world.chunks.get_mut(&chunk_coord).unwrap().push(pos);
+        }
+    }
+}
+
+fn despawn_snakes_if_disabled(
+    mut commands: Commands,
+    snake_settings: Res<SnakeSettings>,
+    query: Query<Entity, With<SandSnake>>,
+) {
+    if !snake_settings.enabled {
+        for entity in query.iter() {
+            commands.entity(entity).despawn_recursive();
         }
     }
 }

@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use serde::{Serialize, Deserialize};
 use std::fs::File;
 use std::io::BufReader;
@@ -68,6 +68,7 @@ pub struct VoxelSounds {
 pub struct VoxelWorld {
     pub blocks: HashMap<IVec3, Entity>,
     pub chunks: HashMap<IVec2, Vec<IVec3>>,
+    pub generated_chunks: HashSet<IVec2>,
 }
 
 #[derive(Resource)]
@@ -97,14 +98,53 @@ impl Plugin for WorldPlugin {
     }
 }
 
-pub fn get_terrain_height(x: i32, z: i32, perlin: &Perlin) -> (i32, i32, i32) {
-    let stone_noise = perlin.get([x as f64 * 0.1, z as f64 * 0.1]);
-    let stone_h = ((stone_noise * 0.5 + 0.5) * 10.0).clamp(0.0, 10.0).round() as i32;
-    
-    let dirt_noise = perlin.get([x as f64 * 0.1 + 100.0, z as f64 * 0.1 + 100.0]);
-    let dirt_h = ((dirt_noise * 0.5 + 0.5) * 10.0).clamp(0.0, 10.0).round() as i32;
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Biome {
+    Plains,
+    Desert,
+    Snow,
+    Mountain,
+}
 
-    (stone_h, dirt_h, -16 + stone_h + dirt_h)
+pub fn get_terrain_height(x: i32, z: i32, perlin: &Perlin) -> (i32, i32, i32, Biome) {
+    // 1. Biome Determination
+    let temp_noise = perlin.get([x as f64 * 0.002, z as f64 * 0.002]);
+    let humidity_noise = perlin.get([x as f64 * 0.002 + 100.0, z as f64 * 0.002 + 100.0]);
+    
+    let mut biome = Biome::Plains;
+    if temp_noise > 0.2 && humidity_noise < 0.0 {
+        biome = Biome::Desert;
+    } else if temp_noise < -0.2 {
+        biome = Biome::Snow;
+    }
+
+    // 2. Height Generation
+    let mut height = 0.0;
+    
+    // Base terrain
+    height += perlin.get([x as f64 * 0.01, z as f64 * 0.01]) * 5.0;
+    height += perlin.get([x as f64 * 0.05, z as f64 * 0.05]) * 2.0;
+    
+    // Mountain influence
+    let mountain_noise = perlin.get([x as f64 * 0.005 + 500.0, z as f64 * 0.005 + 500.0]);
+    if mountain_noise > 0.2 {
+        biome = Biome::Mountain;
+        let intensity = (mountain_noise - 0.2) * 1.25;
+        height += intensity * 40.0;
+    }
+    
+    // River influence
+    let river_noise = perlin.get([x as f64 * 0.005 + 200.0, z as f64 * 0.005 + 200.0]).abs();
+    if river_noise < 0.05 {
+        let depth = (0.05 - river_noise) * 20.0;
+        height -= depth * 15.0;
+    }
+
+    let h = height.round() as i32;
+    let dirt_thickness = if biome == Biome::Mountain { 1 } else { 3 };
+    let stone_h = (h - dirt_thickness).max(-16) + 16;
+
+    (stone_h, dirt_thickness, h, biome)
 }
 
 fn setup_world(
@@ -189,14 +229,21 @@ fn setup_world(
     let eye_mesh = meshes.add(Cuboid::new(0.05, 0.05, 0.05));
     let segment_mesh = meshes.add(Cuboid::new(0.4, 0.4, 0.4));
     let eye_mat = materials.add(Color::BLACK);
+    let leaves = materials.add(Color::srgb(0.2, 0.6, 0.2));
+    let snow = materials.add(Color::WHITE);
+    let ice = materials.add(StandardMaterial {
+        base_color: Color::srgba(0.8, 0.9, 1.0, 0.7),
+        alpha_mode: AlphaMode::Blend,
+        ..default()
+    });
     
     commands.insert_resource(VoxelAssets { 
         mesh, 
         water_meshes,
         faces_meshes,
         _material: grass.clone(), 
-        block_types: vec![grass, dirt, stone, wood, water, source, drain, sand, bedrock, snake_mat.clone(), snake_mat.clone()],
-        block_names: vec!["Grass".to_string(), "Dirt".to_string(), "Stone".to_string(), "Wood".to_string(), "Water".to_string(), "Water Source".to_string(), "Water Drain".to_string(), "Sand".to_string(), "Bedrock".to_string(), "Snake".to_string(), "Snake Segment".to_string()],
+        block_types: vec![grass, dirt, stone, wood, water, source, drain, sand, bedrock, snake_mat.clone(), snake_mat.clone(), leaves, snow, ice],
+        block_names: vec!["Grass".to_string(), "Dirt".to_string(), "Stone".to_string(), "Wood".to_string(), "Water".to_string(), "Water Source".to_string(), "Water Drain".to_string(), "Sand".to_string(), "Bedrock".to_string(), "Snake".to_string(), "Snake Segment".to_string(), "Leaves".to_string(), "Snow".to_string(), "Ice".to_string()],
         snake_material: snake_mat,
         snake_mesh,
         eye_mesh,
@@ -278,7 +325,8 @@ fn update_chunks(
         for z in -render_distance..=render_distance {
             let chunk_coord = player_chunk + IVec2::new(x, z);
             
-            if !voxel_world.chunks.contains_key(&chunk_coord) {
+            if !voxel_world.generated_chunks.contains(&chunk_coord) {
+                voxel_world.generated_chunks.insert(chunk_coord);
                 let mut chunk_blocks = Vec::new();
                 
                 for bx in 0..CHUNK_SIZE {
@@ -287,41 +335,129 @@ fn update_chunks(
                         let world_z = chunk_coord.y * CHUNK_SIZE + bz;
                         
                         // Layered generation
-                        let (stone_h, _, height) = get_terrain_height(world_x, world_z, &world_gen.perlin);
+                        let (stone_h, _, height, biome) = get_terrain_height(world_x, world_z, &world_gen.perlin);
+                        let water_level = -8;
                         
-                        // Generate column from Bedrock up to Height
-                        for y in -16..=height {
+                        // Generate column from Bedrock up to max(height, water_level)
+                        for y in -16..=std::cmp::max(height, water_level) {
                             let pos = IVec3::new(world_x, y, world_z);
                             
+                            let mut is_water = false;
+
                             // Determine Block Type
-                            let block_type_idx = if y == -16 {
-                                8 // Bedrock
-                            } else if y <= -16 + stone_h {
-                                2 // Stone
-                            } else if y < height {
-                                if height <= 2 { 7 } else { 1 } // Sand or Dirt
+                            let block_type_idx = if y <= height {
+                                if y == -16 {
+                                    8 // Bedrock
+                                } else if y <= -16 + stone_h {
+                                    2 // Stone
+                                } else if y < height {
+                                    match biome {
+                                        Biome::Desert => 7, // Sand
+                                        Biome::Mountain => 2, // Stone
+                                        _ => 1, // Dirt
+                                    }
+                                } else {
+                                    if y < water_level { 
+                                        7 // Sand underwater
+                                    } else {
+                                        match biome {
+                                            Biome::Desert => 7, // Sand
+                                            Biome::Snow => 12, // Snow
+                                            Biome::Mountain => if y > 12 { 12 } else { 2 }, // Snow caps or Stone
+                                            Biome::Plains => 0, // Grass
+                                        }
+                                    }
+                                }
                             } else {
-                                if height <= 2 { 7 } else { 0 } // Sand or Grass
+                                is_water = true;
+                                if biome == Biome::Snow && y == water_level {
+                                    13 // Ice
+                                } else {
+                                    4 // Water
+                                }
                             };
 
                             if let Some(mat) = voxel_assets.block_types.get(block_type_idx) {
-                                let id = commands.spawn((
+                                let mesh = if is_water { voxel_assets.water_meshes[8].clone() } else { voxel_assets.mesh.clone() };
+
+                                let mut entity_cmds = commands.spawn((
                                     PbrBundle {
-                                        mesh: voxel_assets.mesh.clone(),
+                                        mesh,
                                         material: mat.clone(),
                                         transform: Transform::from_xyz(world_x as f32, y as f32, world_z as f32),
                                         ..default()
                                     },
                                     BlockType(block_type_idx),
                                     NeedsMeshUpdate, // Calculate visibility on first frame
-                                )).id();
+                                ));
+
+                                if is_water {
+                                    entity_cmds.insert(Liquid { level: 9 });
+                                }
+
+                                let id = entity_cmds.id();
                                 voxel_world.blocks.insert(pos, id);
                                 chunk_blocks.push(pos);
                             }
                         }
+
+                        // Trees
+                        if height > water_level && biome == Biome::Plains { // Only on Plains
+                            let seed = (world_x as f32 * 12.9898 + world_z as f32 * 78.233).sin().abs();
+                            if seed < 0.015 { // 1.5% chance
+                                let tree_h = 4;
+                                // Trunk
+                                for i in 1..=tree_h {
+                                    let pos = IVec3::new(world_x, height + i, world_z);
+                                    if voxel_world.blocks.contains_key(&pos) { continue; }
+                                    
+                                    let id = commands.spawn((
+                                        PbrBundle {
+                                            mesh: voxel_assets.mesh.clone(),
+                                            material: voxel_assets.block_types[3].clone(), // Wood
+                                            transform: Transform::from_xyz(pos.x as f32, pos.y as f32, pos.z as f32),
+                                            ..default()
+                                        },
+                                        BlockType(3),
+                                        NeedsMeshUpdate,
+                                    )).id();
+                                    voxel_world.blocks.insert(pos, id);
+                                    chunk_blocks.push(pos);
+                                }
+                                // Leaves
+                                for ly in height + tree_h - 1..=height + tree_h + 1 {
+                                    for lx in world_x - 2..=world_x + 2 {
+                                        for lz in world_z - 2..=world_z + 2 {
+                                            let pos = IVec3::new(lx, ly, lz);
+                                            if voxel_world.blocks.contains_key(&pos) { continue; }
+                                            if (lx - world_x).abs() + (lz - world_z).abs() > 2 { continue; } // Diamond shape
+                                            
+                                            let id = commands.spawn((
+                                                PbrBundle {
+                                                    mesh: voxel_assets.mesh.clone(),
+                                                    material: voxel_assets.block_types[11].clone(), // Leaves
+                                                    transform: Transform::from_xyz(pos.x as f32, pos.y as f32, pos.z as f32),
+                                                    ..default()
+                                                },
+                                                BlockType(11),
+                                                NeedsMeshUpdate,
+                                            )).id();
+                                            voxel_world.blocks.insert(pos, id);
+                                            
+                                            let c_coord = IVec2::new((lx as f32 / CHUNK_SIZE as f32).floor() as i32, (lz as f32 / CHUNK_SIZE as f32).floor() as i32);
+                                            if c_coord == chunk_coord {
+                                                chunk_blocks.push(pos);
+                                            } else {
+                                                voxel_world.chunks.entry(c_coord).or_default().push(pos);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
-                voxel_world.chunks.insert(chunk_coord, chunk_blocks);
+                voxel_world.chunks.entry(chunk_coord).or_default().append(&mut chunk_blocks);
             }
         }
     }
@@ -336,6 +472,7 @@ fn update_chunks(
     }
 
     for chunk_coord in chunks_to_remove {
+        voxel_world.generated_chunks.remove(&chunk_coord);
         if let Some(blocks) = voxel_world.chunks.remove(&chunk_coord) {
             for pos in blocks {
                 if let Some(entity) = voxel_world.blocks.remove(&pos) {
@@ -362,7 +499,7 @@ fn update_mesh_system(
         commands.entity(entity).remove::<NeedsMeshUpdate>();
         
         // Don't cull faces for water (complex) or special blocks, just solid ones
-        if block_type.0 == 4 || block_type.0 == 9 || block_type.0 == 10 { continue; }
+        if block_type.0 == 4 || block_type.0 == 9 || block_type.0 == 10 || block_type.0 == 13 { continue; }
 
         let mut mask = 0;
 
@@ -377,7 +514,7 @@ fn update_mesh_system(
             if let Some(&neighbor) = voxel_world.blocks.get(&(pos + dir)) {
                 if let Ok(n_type) = block_type_query.get(neighbor) {
                     // If neighbor is solid (not water), hide face
-                    if n_type.0 != 4 && n_type.0 != 9 && n_type.0 != 10 { mask |= bit; }
+                    if n_type.0 != 4 && n_type.0 != 9 && n_type.0 != 10 && n_type.0 != 13 { mask |= bit; }
                 }
             }
         }
@@ -510,6 +647,12 @@ fn water_dynamics(
 
         for dir in shuffled_dirs {
             let neighbor = pos + dir;
+            let target_chunk = IVec2::new(
+                (neighbor.x as f32 / CHUNK_SIZE as f32).floor() as i32,
+                (neighbor.z as f32 / CHUNK_SIZE as f32).floor() as i32,
+            );
+            if !voxel_world.generated_chunks.contains(&target_chunk) { continue; }
+
             if let Some(&neighbor_entity) = voxel_world.blocks.get(&neighbor) {
                 // Merge Sideways
                 if let Ok([(_, _, mut my_liq), (_, _, mut neighbor_liq)]) = query.get_many_mut([entity, neighbor_entity]) {
@@ -790,6 +933,7 @@ fn save_load_world(
             }
             voxel_world.blocks.clear();
             voxel_world.chunks.clear();
+            voxel_world.generated_chunks.clear();
 
             let reader = BufReader::new(file);
             if let Ok(saved_blocks) = serde_json::from_reader::<_, Vec<SavedBlock>>(reader) {
@@ -829,6 +973,7 @@ fn save_load_world(
                             (pos.z as f32 / CHUNK_SIZE as f32).floor() as i32,
                         );
                         voxel_world.chunks.entry(chunk_coord).or_default().push(pos);
+                        voxel_world.generated_chunks.insert(chunk_coord);
                     }
                 }
                 info!("World loaded from world.json");

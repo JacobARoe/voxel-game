@@ -31,7 +31,7 @@ impl Plugin for PlayerPlugin {
 
 fn setup_player(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials: ResMut<Assets<StandardMaterial>>, world_gen: Res<crate::world::WorldGen>) {
     // Calculate spawn height based on terrain generation at (0,0)
-    let (_, _, height) = crate::world::get_terrain_height(0, 0, &world_gen.perlin);
+    let (_, _, height, _) = crate::world::get_terrain_height(0, 0, &world_gen.perlin);
 
     // Spawn Player with a Camera child
     commands.spawn((
