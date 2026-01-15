@@ -5,6 +5,7 @@ use std::fs::File;
 use std::io::BufReader;
 use noise::{NoiseFn, Perlin};
 use bevy::render::{mesh::PrimitiveTopology, render_asset::RenderAssetUsages};
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use crate::player::Player;
 use crate::ui::GameState;
 
@@ -51,6 +52,12 @@ pub struct Cloud {
     pub speed: f32,
 }
 
+#[derive(Component)]
+pub struct Beehive {
+    pub spawn_timer: Timer,
+    pub spawn_count: usize,
+}
+
 #[derive(Serialize, Deserialize)]
 struct SavedBlock {
     x: i32,
@@ -78,6 +85,12 @@ pub struct VoxelAssets {
     pub crack_materials: Vec<Handle<StandardMaterial>>,
     pub cloud_material: Handle<StandardMaterial>,
     pub chimney_mesh: Handle<Mesh>,
+    pub sheep_mesh: Handle<Mesh>,
+    pub sheep_material: Handle<StandardMaterial>,
+    pub sheep_head_mesh: Handle<Mesh>,
+    pub sheep_leg_mesh: Handle<Mesh>,
+    pub bee_mesh: Handle<Mesh>,
+    pub bee_material: Handle<StandardMaterial>,
 }
 
 #[derive(Resource)]
@@ -107,7 +120,7 @@ pub struct WorldTime {
 
 impl Default for WorldTime {
     fn default() -> Self {
-        Self { time: 0.2, speed: 0.02 } // Start near noon
+        Self { time: 0.2, speed: 0.002 } // Start near noon
     }
 }
 
@@ -190,6 +203,7 @@ fn setup_world(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
     asset_server: Res<AssetServer>,
 ) {
     // Spawn a light
@@ -250,30 +264,97 @@ fn setup_world(
         let height = (i as f32 + 1.0) / 9.0;
         water_meshes.push(meshes.add(Cuboid::new(1.0, height, 1.0)));
     }
-    let grass = materials.add(Color::srgb(0.3, 0.8, 0.3));
-    let dirt = materials.add(Color::srgb(0.8, 0.7, 0.6));
-    let stone = materials.add(Color::srgb(0.5, 0.5, 0.5));
-    let wood = materials.add(Color::srgb(0.4, 0.2, 0.1));
-    let sand = materials.add(Color::srgb(0.9, 0.8, 0.5));
+
+    // Texture Generation Helper
+    let create_texture = |images: &mut Assets<Image>, base: Color, noise_factor: f32, freq: f64| -> Handle<Image> {
+        let size = 64;
+        let mut data = Vec::with_capacity((size * size * 4) as usize);
+        let perlin = Perlin::new(1);
+        let rgba = LinearRgba::from(base);
+
+        for y in 0..size {
+            for x in 0..size {
+                let n = perlin.get([x as f64 * freq, y as f64 * freq]) as f32 * noise_factor;
+                data.push(((rgba.red + n).clamp(0.0, 1.0) * 255.0) as u8);
+                data.push(((rgba.green + n).clamp(0.0, 1.0) * 255.0) as u8);
+                data.push(((rgba.blue + n).clamp(0.0, 1.0) * 255.0) as u8);
+                data.push((rgba.alpha * 255.0) as u8);
+            }
+        }
+        images.add(Image::new(
+            Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+            TextureDimension::D2,
+            data,
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::RENDER_WORLD,
+        ))
+    };
+
+    // Ore Texture Helper
+    let create_ore_texture = |images: &mut Assets<Image>, ore_col: Color| -> Handle<Image> {
+        let size = 64;
+        let mut data = Vec::with_capacity((size * size * 4) as usize);
+        let perlin = Perlin::new(2);
+        let stone_rgba = LinearRgba::from(Color::srgb(0.5, 0.5, 0.5));
+        let ore_rgba = LinearRgba::from(ore_col);
+
+        for y in 0..size {
+            for x in 0..size {
+                let n = perlin.get([x as f64 * 0.15, y as f64 * 0.15]) as f32;
+                let stone_n = perlin.get([x as f64 * 0.5, y as f64 * 0.5]) as f32 * 0.1;
+                
+                let final_col = if n > 0.3 {
+                    ore_rgba
+                } else {
+                    LinearRgba {
+                        red: (stone_rgba.red + stone_n).clamp(0.0, 1.0),
+                        green: (stone_rgba.green + stone_n).clamp(0.0, 1.0),
+                        blue: (stone_rgba.blue + stone_n).clamp(0.0, 1.0),
+                        alpha: 1.0
+                    }
+                };
+                
+                data.push((final_col.red * 255.0) as u8);
+                data.push((final_col.green * 255.0) as u8);
+                data.push((final_col.blue * 255.0) as u8);
+                data.push(255);
+            }
+        }
+        images.add(Image::new(
+            Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+            TextureDimension::D2,
+            data,
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::RENDER_WORLD,
+        ))
+    };
+
+    let grass = materials.add(StandardMaterial { base_color_texture: Some(create_texture(&mut images, Color::srgb(0.3, 0.8, 0.3), 0.1, 0.2)), perceptual_roughness: 0.9, ..default() });
+    let dirt = materials.add(StandardMaterial { base_color_texture: Some(create_texture(&mut images, Color::srgb(0.5, 0.4, 0.3), 0.15, 0.3)), perceptual_roughness: 1.0, ..default() });
+    let stone = materials.add(StandardMaterial { base_color_texture: Some(create_texture(&mut images, Color::srgb(0.5, 0.5, 0.5), 0.1, 0.5)), perceptual_roughness: 0.8, ..default() });
+    let wood = materials.add(StandardMaterial { base_color_texture: Some(create_texture(&mut images, Color::srgb(0.4, 0.25, 0.1), 0.1, 0.8)), perceptual_roughness: 0.8, ..default() });
+    let sand = materials.add(StandardMaterial { base_color_texture: Some(create_texture(&mut images, Color::srgb(0.9, 0.85, 0.6), 0.05, 0.6)), perceptual_roughness: 1.0, ..default() });
     let water = materials.add(StandardMaterial {
-        base_color: Color::srgba(0.0, 0.4, 0.8, 0.5),
+        base_color: Color::srgba(0.1, 0.4, 0.8, 0.6),
         alpha_mode: AlphaMode::Blend,
+        perceptual_roughness: 0.1,
         ..default()
     });
     let source = materials.add(Color::srgb(0.0, 1.0, 1.0));
     let drain = materials.add(Color::srgb(0.2, 0.0, 0.0));
-    let bedrock = materials.add(Color::srgb(0.1, 0.1, 0.1));
+    let bedrock = materials.add(StandardMaterial { base_color_texture: Some(create_texture(&mut images, Color::srgb(0.1, 0.1, 0.1), 0.05, 0.9)), perceptual_roughness: 0.9, ..default() });
     let snake_mat = materials.add(Color::srgb(0.2, 0.8, 0.2));
     let snake_mesh = meshes.add(Cuboid::new(0.5, 0.5, 0.9));
     let eye_mesh = meshes.add(Cuboid::new(0.05, 0.05, 0.05));
     let segment_mesh = meshes.add(Cuboid::new(0.4, 0.4, 0.4));
     let torch_mesh = meshes.add(Cuboid::new(0.2, 0.6, 0.2));
     let eye_mat = materials.add(Color::BLACK);
-    let leaves = materials.add(Color::srgb(0.2, 0.6, 0.2));
-    let snow = materials.add(Color::WHITE);
+    let leaves = materials.add(StandardMaterial { base_color_texture: Some(create_texture(&mut images, Color::srgb(0.2, 0.6, 0.2), 0.1, 0.4)), perceptual_roughness: 0.8, ..default() });
+    let snow = materials.add(StandardMaterial { base_color_texture: Some(create_texture(&mut images, Color::WHITE, 0.05, 0.5)), perceptual_roughness: 0.5, ..default() });
     let ice = materials.add(StandardMaterial {
         base_color: Color::srgba(0.8, 0.9, 1.0, 0.7),
         alpha_mode: AlphaMode::Blend,
+        perceptual_roughness: 0.1,
         ..default()
     });
     let torch_mat = materials.add(StandardMaterial {
@@ -281,19 +362,46 @@ fn setup_world(
         emissive: LinearRgba::new(1.0, 0.8, 0.2, 1.0) * 10.0,
         ..default()
     });
-    let iron_ore = materials.add(Color::srgb(0.6, 0.4, 0.3));
-    let copper_ore = materials.add(Color::srgb(0.8, 0.5, 0.3));
-    let silver_ore = materials.add(Color::srgb(0.9, 0.9, 1.0));
-    let gold_ore = materials.add(Color::srgb(1.0, 0.8, 0.0));
-    let furnace_mat = materials.add(Color::srgb(0.2, 0.2, 0.2));
-    let iron_ingot = materials.add(Color::srgb(0.7, 0.7, 0.7));
-    let copper_ingot = materials.add(Color::srgb(0.8, 0.4, 0.2));
-    let silver_ingot = materials.add(Color::srgb(0.95, 0.95, 1.0));
-    let gold_ingot = materials.add(Color::srgb(1.0, 0.9, 0.0));
+    let iron_ore = materials.add(StandardMaterial { base_color_texture: Some(create_ore_texture(&mut images, Color::srgb(0.6, 0.4, 0.3))), perceptual_roughness: 0.7, metallic: 0.2, ..default() });
+    let copper_ore = materials.add(StandardMaterial { base_color_texture: Some(create_ore_texture(&mut images, Color::srgb(0.8, 0.5, 0.3))), perceptual_roughness: 0.7, metallic: 0.3, ..default() });
+    let silver_ore = materials.add(StandardMaterial { base_color_texture: Some(create_ore_texture(&mut images, Color::srgb(0.9, 0.9, 1.0))), perceptual_roughness: 0.6, metallic: 0.4, ..default() });
+    let gold_ore = materials.add(StandardMaterial { base_color_texture: Some(create_ore_texture(&mut images, Color::srgb(1.0, 0.8, 0.0))), perceptual_roughness: 0.6, metallic: 0.5, ..default() });
+    let furnace_mat = materials.add(StandardMaterial { base_color_texture: Some(create_texture(&mut images, Color::srgb(0.2, 0.2, 0.2), 0.05, 0.5)), perceptual_roughness: 0.8, ..default() });
+    
+    let iron_ingot = materials.add(StandardMaterial { base_color: Color::srgb(0.7, 0.7, 0.7), metallic: 0.8, perceptual_roughness: 0.3, ..default() });
+    let copper_ingot = materials.add(StandardMaterial { base_color: Color::srgb(0.8, 0.4, 0.2), metallic: 0.8, perceptual_roughness: 0.3, ..default() });
+    let silver_ingot = materials.add(StandardMaterial { base_color: Color::srgb(0.95, 0.95, 1.0), metallic: 0.9, perceptual_roughness: 0.2, ..default() });
+    let gold_ingot = materials.add(StandardMaterial { base_color: Color::srgb(1.0, 0.9, 0.0), metallic: 0.9, perceptual_roughness: 0.2, ..default() });
+    
     let pickaxe = materials.add(Color::srgb(0.4, 0.4, 0.5));
     let axe = materials.add(Color::srgb(0.6, 0.3, 0.1));
     let shovel = materials.add(Color::srgb(0.7, 0.7, 0.7));
     let chimney_mesh = meshes.add(Cuboid::new(0.4, 0.4, 0.4));
+    let glowing_moss = materials.add(StandardMaterial {
+        base_color_texture: Some(create_texture(&mut images, Color::srgb(0.3, 0.9, 0.3), 0.2, 0.8)),
+        emissive: LinearRgba::new(0.2, 0.8, 0.2, 1.0) * 4.0,
+        perceptual_roughness: 1.0,
+        ..default()
+    });
+    let sheep_mesh = meshes.add(Cuboid::new(0.6, 0.6, 1.0));
+    let sheep_material = materials.add(StandardMaterial {
+        base_color: Color::WHITE,
+        perceptual_roughness: 0.8,
+        ..default()
+    });
+    let sheep_head_mesh = meshes.add(Cuboid::new(0.4, 0.4, 0.4));
+    let sheep_leg_mesh = meshes.add(Cuboid::new(0.15, 0.4, 0.15));
+    let beehive_mat = materials.add(StandardMaterial {
+        base_color_texture: Some(create_texture(&mut images, Color::srgb(0.9, 0.7, 0.2), 0.1, 0.5)),
+        perceptual_roughness: 0.8,
+        ..default()
+    });
+    let bee_mesh = meshes.add(Cuboid::new(0.2, 0.2, 0.2));
+    let bee_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.9, 0.0),
+        perceptual_roughness: 0.6,
+        ..default()
+    });
     
     let mut crack_materials = Vec::new();
     for i in 0..10 {
@@ -317,8 +425,8 @@ fn setup_world(
         water_meshes,
         faces_meshes,
         _material: grass.clone(), 
-        block_types: vec![grass, dirt, stone, wood, water, source, drain, sand, bedrock, snake_mat.clone(), snake_mat.clone(), leaves, snow, ice, torch_mat, iron_ore, copper_ore, silver_ore, gold_ore, furnace_mat, iron_ingot, copper_ingot, silver_ingot, gold_ingot, pickaxe, axe, shovel],
-        block_names: vec!["Grass".to_string(), "Dirt".to_string(), "Stone".to_string(), "Wood".to_string(), "Water".to_string(), "Water Source".to_string(), "Water Drain".to_string(), "Sand".to_string(), "Bedrock".to_string(), "Snake".to_string(), "Snake Segment".to_string(), "Leaves".to_string(), "Snow".to_string(), "Ice".to_string(), "Torch".to_string(), "Iron Ore".to_string(), "Copper Ore".to_string(), "Silver Ore".to_string(), "Gold Ore".to_string(), "Furnace".to_string(), "Iron Ingot".to_string(), "Copper Ingot".to_string(), "Silver Ingot".to_string(), "Gold Ingot".to_string(), "Pickaxe".to_string(), "Axe".to_string(), "Shovel".to_string()],
+        block_types: vec![grass, dirt, stone, wood, water, source, drain, sand, bedrock, snake_mat.clone(), snake_mat.clone(), leaves, snow, ice, torch_mat, iron_ore, copper_ore, silver_ore, gold_ore, furnace_mat, iron_ingot, copper_ingot, silver_ingot, gold_ingot, pickaxe, axe, shovel, glowing_moss, beehive_mat],
+        block_names: vec!["Grass".to_string(), "Dirt".to_string(), "Stone".to_string(), "Wood".to_string(), "Water".to_string(), "Water Source".to_string(), "Water Drain".to_string(), "Sand".to_string(), "Bedrock".to_string(), "Snake".to_string(), "Snake Segment".to_string(), "Leaves".to_string(), "Snow".to_string(), "Ice".to_string(), "Torch".to_string(), "Iron Ore".to_string(), "Copper Ore".to_string(), "Silver Ore".to_string(), "Gold Ore".to_string(), "Furnace".to_string(), "Iron Ingot".to_string(), "Copper Ingot".to_string(), "Silver Ingot".to_string(), "Gold Ingot".to_string(), "Pickaxe".to_string(), "Axe".to_string(), "Shovel".to_string(), "Glowing Moss".to_string(), "Beehive".to_string()],
         snake_material: snake_mat,
         snake_mesh,
         eye_mesh,
@@ -328,6 +436,12 @@ fn setup_world(
         crack_materials,
         cloud_material,
         chimney_mesh,
+        sheep_mesh,
+        sheep_material,
+        sheep_head_mesh,
+        sheep_leg_mesh,
+        bee_mesh,
+        bee_material,
     });
 
     commands.insert_resource(VoxelSounds {
@@ -484,12 +598,14 @@ fn update_chunks(
                         // Layered generation
                         let (stone_h, _, height, biome) = get_terrain_height(world_x, world_z, &world_gen.perlin);
                         let water_level = -8;
+                        let mut prev_solid = true; // Bedrock is below -16
                         
                         // Generate column from Bedrock up to max(height, water_level)
                         for y in -16..=std::cmp::max(height, water_level) {
                             let pos = IVec3::new(world_x, y, world_z);
                             
                             let mut is_water = false;
+                            let mut is_moss = false;
 
                             // Cave Generation
                             if y <= height && y > -16 {
@@ -497,12 +613,27 @@ fn update_chunks(
                                 let cave_noise = world_gen.perlin.get([world_x as f64 * cave_scale, y as f64 * cave_scale, world_z as f64 * cave_scale + 400.0]);
                                 let threshold = if biome == Biome::Mountain { 0.2 } else { 0.4 };
                                 if cave_noise > threshold {
-                                    continue;
+                                    // Cave Air
+                                    // Check for moss placement on floor
+                                    if prev_solid {
+                                        let moss_noise = world_gen.perlin.get([world_x as f64 * 0.8, y as f64 * 0.8, world_z as f64 * 0.8]);
+                                        if moss_noise > 0.6 { // Sporadic patches
+                                            is_moss = true;
+                                        } else {
+                                            prev_solid = false;
+                                            continue;
+                                        }
+                                    } else {
+                                        prev_solid = false;
+                                        continue;
+                                    }
                                 }
                             }
 
                             // Determine Block Type
-                            let mut block_type_idx = if y <= height {
+                            let mut block_type_idx = if is_moss {
+                                27 // Glowing Moss
+                            } else if y <= height {
                                 if y == -16 {
                                     8 // Bedrock
                                 } else if y <= -16 + stone_h {
@@ -546,7 +677,11 @@ fn update_chunks(
                             }
 
                             if let Some(mat) = voxel_assets.block_types.get(block_type_idx) {
-                                let mesh = if is_water { voxel_assets.water_meshes[8].clone() } else { voxel_assets.mesh.clone() };
+                                let mesh = if is_water { 
+                                    voxel_assets.water_meshes[8].clone() 
+                                } else if block_type_idx == 27 {
+                                    voxel_assets.water_meshes[0].clone() // 1/9 height slab
+                                } else { voxel_assets.mesh.clone() };
 
                                 let mut entity_cmds = commands.spawn((
                                     PbrBundle {
@@ -563,9 +698,31 @@ fn update_chunks(
                                     entity_cmds.insert(Liquid { level: 9 });
                                 }
 
+                                if block_type_idx == 27 {
+                                    entity_cmds.insert(Transform::from_xyz(world_x as f32, y as f32 - 0.5 + (1.0/18.0), world_z as f32));
+                                }
+
+                                if block_type_idx == 27 {
+                                    entity_cmds.with_children(|parent| {
+                                        parent.spawn(PointLightBundle {
+                                            point_light: PointLight {
+                                                intensity: 2000.0,
+                                                range: 10.0,
+                                                color: Color::srgb(0.2, 1.0, 0.2),
+                                                shadows_enabled: false,
+                                                ..default()
+                                            },
+                                            transform: Transform::from_xyz(0.0, 0.5, 0.0),
+                                            ..default()
+                                        });
+                                    });
+                                }
+
                                 let id = entity_cmds.id();
                                 voxel_world.blocks.insert(pos, id);
                                 chunk_blocks.push(pos);
+                                
+                                prev_solid = !is_water;
                             }
                         }
 
@@ -679,6 +836,34 @@ fn update_chunks(
                                     }
                                 }
                                 }
+
+                                // Beehives
+                                let hive_seed = (world_x as f32 * 37.1 + world_z as f32 * 19.3).cos().abs();
+                                if (tree_type == 0 || tree_type == 1) && hive_seed < 0.005 { // 0.5% chance on Oak
+                                    let trunk_pos = IVec3::new(world_x, height + trunk_h - 2, world_z);
+                                    let dir_idx = (world_x + world_z).rem_euclid(4) as usize;
+                                    let dir = [IVec3::X, IVec3::NEG_X, IVec3::Z, IVec3::NEG_Z][dir_idx];
+                                    let hive_pos = trunk_pos + dir;
+                                    
+                                    if !voxel_world.blocks.contains_key(&hive_pos) {
+                                        let id = commands.spawn((
+                                            PbrBundle {
+                                                mesh: voxel_assets.mesh.clone(),
+                                                material: voxel_assets.block_types[28].clone(), // Beehive
+                                                transform: Transform::from_xyz(hive_pos.x as f32, hive_pos.y as f32, hive_pos.z as f32),
+                                                ..default()
+                                            },
+                                            BlockType(28),
+                                            Beehive {
+                                                spawn_timer: Timer::from_seconds(5.0, TimerMode::Repeating),
+                                                spawn_count: 0,
+                                            },
+                                            NeedsMeshUpdate,
+                                        )).id();
+                                        voxel_world.blocks.insert(hive_pos, id);
+                                        chunk_blocks.push(hive_pos);
+                                    }
+                                }
                             }
                         }
                     }
@@ -725,7 +910,7 @@ fn update_mesh_system(
         commands.entity(entity).remove::<NeedsMeshUpdate>();
         
         // Don't cull faces for water (complex) or special blocks, just solid ones
-        if block_type.0 == 4 || block_type.0 == 9 || block_type.0 == 10 || block_type.0 == 13 || block_type.0 == 14 || block_type.0 == 19 { continue; }
+        if block_type.0 == 4 || block_type.0 == 9 || block_type.0 == 10 || block_type.0 == 13 || block_type.0 == 14 || block_type.0 == 19 || block_type.0 == 27 || block_type.0 == 28 { continue; }
 
         let mut mask = 0;
 
@@ -740,7 +925,7 @@ fn update_mesh_system(
             if let Some(&neighbor) = voxel_world.blocks.get(&(pos + dir)) {
                 if let Ok(n_type) = block_type_query.get(neighbor) {
                     // If neighbor is solid (not water), hide face
-                    if n_type.0 != 4 && n_type.0 != 9 && n_type.0 != 10 && n_type.0 != 13 && n_type.0 != 14 && n_type.0 != 19 { mask |= bit; }
+                    if n_type.0 != 4 && n_type.0 != 9 && n_type.0 != 10 && n_type.0 != 13 && n_type.0 != 14 && n_type.0 != 19 && n_type.0 != 27 && n_type.0 != 28 { mask |= bit; }
                 }
             }
         }
@@ -838,8 +1023,37 @@ fn water_dynamics(
         // 1. Vertical Logic
         let down = pos - IVec3::Y;
         let mut moved_down = false;
+        let mut below_entity_opt = voxel_world.blocks.get(&down).copied();
 
-        if let Some(&below_entity) = voxel_world.blocks.get(&down) {
+        // Check for destroyable block below (Torch or Moss)
+        if let Some(below_entity) = below_entity_opt {
+            if let Ok(block_type) = block_type_query.get(below_entity) {
+                if block_type.0 == 14 || block_type.0 == 27 {
+                    // Destroy block
+                    if let Ok(mat_handle) = block_material_query.get(below_entity) {
+                        // Spawn particles (reuse erosion particle logic)
+                         commands.spawn((
+                            PbrBundle {
+                                mesh: voxel_assets.mesh.clone(),
+                                material: mat_handle.clone(),
+                                transform: Transform::from_translation(down.as_vec3() + 0.5).with_scale(Vec3::splat(0.2)),
+                                ..default()
+                            },
+                            Particle {
+                                lifetime: Timer::from_seconds(0.5, TimerMode::Once),
+                                velocity: Vec3::new(0.0, 2.0, 0.0),
+                            }
+                        ));
+                    }
+                    commands.entity(below_entity).despawn_recursive();
+                    voxel_world.blocks.remove(&down);
+                    // We don't update chunks/neighbors here for speed, water will fill it immediately or next frame
+                    below_entity_opt = None;
+                }
+            }
+        }
+
+        if let Some(below_entity) = below_entity_opt {
             // Merge Down
             if let Ok([(_, _, mut my_liq), (_, _, mut below_liq)]) = query.get_many_mut([entity, below_entity]) {
                 let space = 9 - below_liq.level;
@@ -880,14 +1094,24 @@ fn water_dynamics(
             if !voxel_world.generated_chunks.contains(&target_chunk) { continue; }
 
             if let Some(&neighbor_entity) = voxel_world.blocks.get(&neighbor) {
-                // Merge Sideways
-                if let Ok([(_, _, mut my_liq), (_, _, mut neighbor_liq)]) = query.get_many_mut([entity, neighbor_entity]) {
-                    if neighbor_liq.level < 9 {
-                        let space = 9 - neighbor_liq.level;
-                        let transfer = std::cmp::min(my_liq.level, space);
-                        neighbor_liq.level += transfer;
-                        my_liq.level -= transfer;
-                        if my_liq.level == 0 { break; }
+                // Check if destroyable
+                let mut destroyable = false;
+                if let Ok(bt) = block_type_query.get(neighbor_entity) {
+                    if bt.0 == 14 || bt.0 == 27 { destroyable = true; }
+                }
+
+                if destroyable {
+                    if flow_target.is_none() { flow_target = Some(neighbor); }
+                } else {
+                    // Merge Sideways
+                    if let Ok([(_, _, mut my_liq), (_, _, mut neighbor_liq)]) = query.get_many_mut([entity, neighbor_entity]) {
+                        if neighbor_liq.level < 9 {
+                            let space = 9 - neighbor_liq.level;
+                            let transfer = std::cmp::min(my_liq.level, space);
+                            neighbor_liq.level += transfer;
+                            my_liq.level -= transfer;
+                            if my_liq.level == 0 { break; }
+                        }
                     }
                 }
             } else if flow_target.is_none() {
@@ -901,6 +1125,27 @@ fn water_dynamics(
 
         // 3. Flow Sideways (Split or Move)
         if let Some(target) = flow_target {
+             // Destroy target if it exists (Torch/Moss)
+             if let Some(&target_entity) = voxel_world.blocks.get(&target) {
+                if let Ok(mat_handle) = block_material_query.get(target_entity) {
+                     commands.spawn((
+                        PbrBundle {
+                            mesh: voxel_assets.mesh.clone(),
+                            material: mat_handle.clone(),
+                            transform: Transform::from_translation(target.as_vec3() + 0.5).with_scale(Vec3::splat(0.2)),
+                            ..default()
+                        },
+                        Particle {
+                            lifetime: Timer::from_seconds(0.5, TimerMode::Once),
+                            velocity: Vec3::new(0.0, 2.0, 0.0),
+                        }
+                    ));
+                }
+                commands.entity(target_entity).despawn_recursive();
+                voxel_world.blocks.remove(&target);
+                // Chunk update handled by new water block insertion
+             }
+
              if let Ok((_, mut transform, mut liq)) = query.get_mut(entity) {
                 // Randomly choose between splitting and flowing (moving)
                 let pseudo_rand = (pos.x + pos.y + pos.z) as f32 + time.elapsed_seconds() * 10.0;
@@ -1284,6 +1529,8 @@ fn save_load_world(
                             voxel_assets.water_meshes[8].clone()
                         } else if block.type_index == 14 {
                             voxel_assets.torch_mesh.clone()
+                        } else if block.type_index == 27 {
+                            voxel_assets.water_meshes[0].clone()
                         } else {
                             voxel_assets.mesh.clone()
                         };
@@ -1348,6 +1595,32 @@ fn save_load_world(
                                     transform: Transform::from_xyz(0.0, 0.2, 0.0),
                                     ..default()
                                 });
+                            });
+                        }
+
+                        if block.type_index == 27 {
+                            // Adjust transform for slab
+                            entity_cmds.insert(Transform::from_xyz(pos.x as f32, pos.y as f32 - 0.5 + (1.0/18.0), pos.z as f32));
+                            
+                            entity_cmds.with_children(|parent| {
+                                parent.spawn(PointLightBundle {
+                                    point_light: PointLight {
+                                        intensity: 2000.0,
+                                        range: 10.0,
+                                        color: Color::srgb(0.2, 1.0, 0.2),
+                                        shadows_enabled: false,
+                                        ..default()
+                                    },
+                                    transform: Transform::from_xyz(0.0, 0.5, 0.0),
+                                    ..default()
+                                });
+                            });
+                        }
+
+                        if block.type_index == 28 {
+                            entity_cmds.insert(Beehive {
+                                spawn_timer: Timer::from_seconds(5.0, TimerMode::Repeating),
+                                spawn_count: 0,
                             });
                         }
 

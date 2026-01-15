@@ -11,6 +11,7 @@ pub enum GameState {
     Paused,
     Crafting,
     Inventory,
+    GameOver,
 }
 
 #[derive(Resource)]
@@ -57,7 +58,7 @@ impl Default for Inventory {
     fn default() -> Self {
         let mut items = HashMap::new();
         // Start with 64 of each basic block type
-        for i in 0..27 { items.insert(i, 64); }
+        for i in 0..29 { items.insert(i, 64); }
         Self {
             selected_slot: 0,
             hotbar: [None; 9], // Default loadout
@@ -80,6 +81,15 @@ pub struct HealthText;
 #[derive(Component)]
 pub struct PauseMenu;
 
+#[derive(Component)]
+pub struct DamageOverlay;
+
+#[derive(Component)]
+pub struct DeathMenu;
+
+#[derive(Component)]
+pub struct RespawnButton;
+
 pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
@@ -88,17 +98,35 @@ impl Plugin for UiPlugin {
             .insert_resource(Inventory::default())
             .insert_resource(SnakeSettings::default())
             .add_systems(Startup, setup_ui)
-            .add_systems(Update, (inventory_input.run_if(in_state(GameState::Playing).or_else(in_state(GameState::Inventory))), update_inventory_ui, update_health_ui, toggle_pause, toggle_crafting, toggle_inventory, handle_snake_toggle, handle_crafting_click, handle_inventory_click))
+            .add_systems(Update, (inventory_input.run_if(in_state(GameState::Playing).or_else(in_state(GameState::Inventory))), update_inventory_ui, update_health_ui, update_damage_overlay, toggle_pause, toggle_crafting, toggle_inventory, handle_snake_toggle, handle_crafting_click, handle_inventory_click, handle_respawn_click))
             .add_systems(OnEnter(GameState::Paused), spawn_pause_menu)
             .add_systems(OnExit(GameState::Paused), despawn_pause_menu)
             .add_systems(OnEnter(GameState::Crafting), spawn_crafting_menu)
             .add_systems(OnExit(GameState::Crafting), despawn_crafting_menu)
             .add_systems(OnEnter(GameState::Inventory), spawn_inventory_menu)
-            .add_systems(OnExit(GameState::Inventory), despawn_inventory_menu);
+            .add_systems(OnExit(GameState::Inventory), despawn_inventory_menu)
+            .add_systems(OnEnter(GameState::GameOver), spawn_death_menu)
+            .add_systems(OnExit(GameState::GameOver), despawn_death_menu);
     }
 }
 
 fn setup_ui(mut commands: Commands) {
+    // Damage Overlay
+    commands.spawn((
+        NodeBundle {
+            style: Style {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                position_type: PositionType::Absolute,
+                ..default()
+            },
+            background_color: Color::srgba(1.0, 0.0, 0.0, 0.0).into(),
+            z_index: ZIndex::Global(5),
+            ..default()
+        },
+        DamageOverlay,
+    ));
+
     // Crosshair UI
     commands.spawn(NodeBundle {
         style: Style {
@@ -245,6 +273,110 @@ fn inventory_input(
     }
 }
 
+fn spawn_death_menu(mut commands: Commands, mut windows: Query<&mut Window>) {
+    let mut window = windows.single_mut();
+    window.cursor.visible = true;
+    window.cursor.grab_mode = bevy::window::CursorGrabMode::None;
+
+    commands.spawn((
+        NodeBundle {
+            style: Style {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                flex_direction: FlexDirection::Column,
+                position_type: PositionType::Absolute,
+                ..default()
+            },
+            background_color: Color::srgba(0.5, 0.0, 0.0, 0.8).into(),
+            z_index: ZIndex::Global(20),
+            ..default()
+        },
+        DeathMenu,
+    )).with_children(|parent| {
+        parent.spawn(TextBundle::from_section(
+            "YOU DIED",
+            TextStyle {
+                font_size: 80.0,
+                color: Color::WHITE,
+                ..default()
+            },
+        ));
+
+        parent.spawn((
+            ButtonBundle {
+                style: Style {
+                    width: Val::Px(200.0),
+                    height: Val::Px(60.0),
+                    margin: UiRect::top(Val::Px(40.0)),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    ..default()
+                },
+                background_color: Color::srgb(0.3, 0.3, 0.3).into(),
+                ..default()
+            },
+            RespawnButton,
+        )).with_children(|btn| {
+            btn.spawn(TextBundle::from_section(
+                "Respawn",
+                TextStyle { font_size: 30.0, color: Color::WHITE, ..default() }
+            ));
+        });
+    });
+}
+
+fn despawn_death_menu(mut commands: Commands, query: Query<Entity, With<DeathMenu>>) {
+    for entity in query.iter() {
+        commands.entity(entity).despawn_recursive();
+    }
+}
+
+fn handle_respawn_click(
+    mut interaction_query: Query<(&Interaction, &mut BackgroundColor), (Changed<Interaction>, With<RespawnButton>)>,
+    mut next_state: ResMut<NextState<GameState>>,
+    mut player_query: Query<(&mut Transform, &mut Health), With<Player>>,
+    mut windows: Query<&mut Window>,
+    world_gen: Res<crate::world::WorldGen>,
+) {
+    for (interaction, mut bg) in interaction_query.iter_mut() {
+        match *interaction {
+            Interaction::Pressed => {
+                if let Ok((mut transform, mut health)) = player_query.get_single_mut() {
+                    health.value = 100;
+                    let (_, _, height, _) = crate::world::get_terrain_height(0, 0, &world_gen.perlin);
+                    transform.translation = Vec3::new(0.0, height as f32 + 5.0, 0.0);
+                }
+                next_state.set(GameState::Playing);
+                
+                let mut window = windows.single_mut();
+                window.cursor.visible = false;
+                window.cursor.grab_mode = bevy::window::CursorGrabMode::Locked;
+            },
+            Interaction::Hovered => bg.0 = Color::srgb(0.4, 0.4, 0.4).into(),
+            Interaction::None => bg.0 = Color::srgb(0.3, 0.3, 0.3).into(),
+        }
+    }
+}
+
+fn update_damage_overlay(
+    mut query: Query<&mut BackgroundColor, With<DamageOverlay>>,
+    player_query: Query<&Health, With<Player>>,
+) {
+    if let Ok(health) = player_query.get_single() {
+        if let Ok(mut bg) = query.get_single_mut() {
+            let alpha = if !health.invulnerability_timer.finished() {
+                let t = health.invulnerability_timer.fraction_remaining();
+                t * 0.5 // Max 0.5 alpha
+            } else {
+                0.0
+            };
+            bg.0 = Color::srgba(1.0, 0.0, 0.0, alpha).into();
+        }
+    }
+}
+
 fn update_inventory_ui(
     inventory: Res<Inventory>,
     voxel_assets: Res<VoxelAssets>,
@@ -370,7 +502,8 @@ fn toggle_pause(
                 next_state.set(GameState::Playing);
                 window.cursor.visible = false;
                 window.cursor.grab_mode = bevy::window::CursorGrabMode::Locked;
-            }
+            },
+            _ => {}
         }
     }
 }

@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 use bevy::input::mouse::MouseMotion;
-use crate::world::{VoxelWorld, VoxelAssets, VoxelSounds, BlockType, Liquid, WaterSource, WaterDrain, NeedsMeshUpdate, Particle, DroppedItem, Furnace, CHUNK_SIZE};
+use crate::world::{VoxelWorld, VoxelAssets, VoxelSounds, BlockType, Liquid, WaterSource, WaterDrain, NeedsMeshUpdate, Particle, DroppedItem, Furnace, Beehive, CHUNK_SIZE};
 use crate::mobs::SandSnake;
 use crate::ui::Inventory;
 use crate::ui::GameState;
@@ -33,7 +33,7 @@ pub struct PlayerPlugin;
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, setup_player)
-           .add_systems(Update, (move_player, interact_terrain, check_snake_collision, pickup_items).run_if(in_state(GameState::Playing)));
+           .add_systems(Update, (move_player, interact_terrain, check_snake_collision, pickup_items, check_player_death).run_if(in_state(GameState::Playing)));
     }
 }
 
@@ -144,7 +144,7 @@ fn move_player(
         if let Some(&entity) = voxel_world.blocks.get(&check_pos) {
             // Only collide if NOT water (index 4)
             if let Ok(block_type) = block_type_query.get(entity) {
-                if block_type.0 != 4 {
+                if block_type.0 != 4 && block_type.0 != 27 { // Ignore Water and Moss
                     ground_y = y as f32;
                     break;
                 }
@@ -412,6 +412,14 @@ fn interact_terrain(
                 
                 // Check if interacting with a Furnace
                 if let Some(&entity) = voxel_world.blocks.get(&block_pos) {
+                    // Check for moss stacking restriction
+                    if let Ok(block_type) = block_type_query.get(entity) {
+                        if block_type.0 == 27 && prev_pos == block_pos + IVec3::Y {
+                            // Cannot place on top of moss
+                            return;
+                        }
+                    }
+
                     if let Ok(mut furnace) = furnace_query.get_mut(entity) {
                         // Try to take output
                         if let Some(output) = furnace.output.take() {
@@ -464,6 +472,8 @@ fn interact_terrain(
                                     voxel_assets.water_meshes[8].clone()
                                 } else if block_idx == 14 {
                                     voxel_assets.torch_mesh.clone()
+                                } else if block_idx == 27 {
+                                    voxel_assets.water_meshes[0].clone()
                                 } else {
                                     voxel_assets.mesh.clone()
                                 };
@@ -519,8 +529,8 @@ fn interact_terrain(
                                     entity_cmds.with_children(|parent| {
                                         parent.spawn(PointLightBundle {
                                             point_light: PointLight {
-                                                intensity: 15000.0,
-                                                range: 100.0,
+                                                intensity: 20000.0,
+                                                range: 200.0,
                                                 color: Color::srgb(1.0, 0.8, 0.2),
                                                 shadows_enabled: true,
                                                 ..default()
@@ -528,6 +538,32 @@ fn interact_terrain(
                                             transform: Transform::from_xyz(0.0, 0.2, 0.0),
                                             ..default()
                                         });
+                                    });
+                                }
+
+                                if block_idx == 27 {
+                                    // Adjust transform for slab
+                                    entity_cmds.insert(Transform::from_xyz(prev_pos.x as f32, prev_pos.y as f32 - 0.5 + (1.0/18.0), prev_pos.z as f32));
+
+                                    entity_cmds.with_children(|parent| {
+                                        parent.spawn(PointLightBundle {
+                                            point_light: PointLight {
+                                                intensity: 2000.0,
+                                                range: 10.0,
+                                                color: Color::srgb(0.2, 1.0, 0.2),
+                                                shadows_enabled: false,
+                                                ..default()
+                                            },
+                                            transform: Transform::from_xyz(0.0, 0.5, 0.0),
+                                            ..default()
+                                        });
+                                    });
+                                }
+
+                                if block_idx == 28 {
+                                    entity_cmds.insert(Beehive {
+                                        spawn_timer: Timer::from_seconds(5.0, TimerMode::Repeating),
+                                        spawn_count: 0,
                                     });
                                 }
 
@@ -570,6 +606,17 @@ fn interact_terrain(
              state.crack_entity = None;
              state.target = None;
              state.progress = 0.0;
+        }
+    }
+}
+
+fn check_player_death(
+    mut next_state: ResMut<NextState<GameState>>,
+    player_query: Query<&Health, With<Player>>,
+) {
+    if let Ok(health) = player_query.get_single() {
+        if health.value <= 0 {
+            next_state.set(GameState::GameOver);
         }
     }
 }

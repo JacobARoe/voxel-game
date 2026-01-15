@@ -1,7 +1,8 @@
 use bevy::prelude::*;
-use crate::world::{VoxelWorld, VoxelAssets, BlockType, NeedsMeshUpdate, Particle, CHUNK_SIZE, update_voxel_map};
+use crate::world::{VoxelWorld, VoxelAssets, BlockType, NeedsMeshUpdate, Particle, CHUNK_SIZE, update_voxel_map, WorldGen};
 use crate::player::Player;
 use crate::ui::{GameState, SnakeSettings};
+use crate::world::Beehive;
 
 #[derive(Component)]
 pub struct SandSnake {
@@ -11,11 +12,26 @@ pub struct SandSnake {
     pub history: Vec<Vec3>,
 }
 
+#[derive(Component)]
+pub struct Sheep {
+    pub move_timer: Timer,
+    pub target_dir: Vec3,
+    pub velocity: Vec3,
+}
+
+#[derive(Component)]
+pub struct Bee {
+    pub home: IVec3,
+    pub wander_target: Vec3,
+    pub velocity: Vec3,
+    pub change_dir_timer: Timer,
+}
+
 pub struct MobsPlugin;
 
 impl Plugin for MobsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (spawn_snakes, sand_snake_ai, despawn_snakes_if_disabled).run_if(in_state(GameState::Playing)));
+        app.add_systems(Update, (spawn_snakes, sand_snake_ai, despawn_snakes_if_disabled, spawn_sheep, sheep_ai, spawn_bees, bee_ai).run_if(in_state(GameState::Playing)));
     }
 }
 
@@ -82,6 +98,227 @@ fn spawn_snakes(
              }).id();
              voxel_world.blocks.insert(pos, id);
              voxel_world.chunks.get_mut(&chunk_coord).unwrap().push(pos);
+        }
+    }
+}
+
+fn spawn_bees(
+    mut commands: Commands,
+    mut query: Query<(&Transform, &mut Beehive)>,
+    voxel_assets: Res<VoxelAssets>,
+    time: Res<Time>,
+) {
+    for (transform, mut beehive) in query.iter_mut() {
+        beehive.spawn_timer.tick(time.delta());
+        if beehive.spawn_timer.finished() && beehive.spawn_count < 3 {
+            beehive.spawn_count += 1;
+            let pos = transform.translation + Vec3::new(0.0, -0.5, 0.0);
+            
+            commands.spawn((
+                PbrBundle {
+                    mesh: voxel_assets.bee_mesh.clone(),
+                    material: voxel_assets.bee_material.clone(),
+                    transform: Transform::from_translation(pos),
+                    ..default()
+                },
+                Bee {
+                    home: transform.translation.as_ivec3(),
+                    wander_target: Vec3::ZERO,
+                    velocity: Vec3::ZERO,
+                    change_dir_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
+                }
+            ));
+        }
+    }
+}
+
+fn bee_ai(
+    mut query: Query<(&mut Transform, &mut Bee)>,
+    mut player_query: Query<(&Transform, &mut crate::player::Health), (With<Player>, Without<Bee>)>,
+    time: Res<Time>,
+) {
+    let (player_pos, mut player_health) = if let Ok((t, h)) = player_query.get_single_mut() {
+        (Some(t.translation), Some(h))
+    } else {
+        (None, None)
+    };
+
+    for (mut transform, mut bee) in query.iter_mut() {
+        bee.change_dir_timer.tick(time.delta());
+        
+        let mut target = bee.wander_target;
+        let mut speed = 3.0;
+
+        // Chase Logic
+        if let Some(p_pos) = player_pos {
+            let dist = transform.translation.distance(p_pos);
+            if dist < 5.0 {
+                target = p_pos + Vec3::new(0.0, 1.5, 0.0); // Target head
+                speed = 6.0;
+
+                if dist < 1.5 {
+                    if let Some(ref mut health) = player_health {
+                        if health.invulnerability_timer.finished() {
+                            health.value -= 2;
+                            health.invulnerability_timer.reset();
+                        }
+                    }
+                }
+            }
+        }
+
+        if bee.change_dir_timer.finished() {
+            // Pick random target around home
+            let seed = time.elapsed_seconds() + transform.translation.x;
+            let r_x = (seed * 12.3).sin() * 3.0;
+            let r_y = (seed * 45.6).cos() * 2.0;
+            let r_z = (seed * 78.9).sin() * 3.0;
+            
+            bee.wander_target = bee.home.as_vec3() + Vec3::new(r_x, r_y, r_z);
+        }
+        
+        // Move towards target
+        let delta = target - transform.translation;
+        let dist = delta.length();
+        
+        if dist > 0.1 {
+            let dir = delta.normalize();
+            bee.velocity = bee.velocity.lerp(dir * speed, time.delta_seconds() * 2.0);
+            transform.translation += bee.velocity * time.delta_seconds();
+            transform.look_to(bee.velocity, Vec3::Y);
+        }
+        
+        // Bobbing
+        transform.translation.y += (time.elapsed_seconds() * 10.0).sin() * 0.005;
+    }
+}
+
+fn spawn_sheep(
+    mut commands: Commands,
+    query: Query<&Sheep>,
+    player_query: Query<&Transform, With<Player>>,
+    world_gen: Res<WorldGen>,
+    voxel_world: Res<VoxelWorld>,
+    voxel_assets: Res<VoxelAssets>,
+    time: Res<Time>,
+) {
+    if query.iter().count() >= 10 { return; }
+
+    if let Ok(player_transform) = player_query.get_single() {
+        let player_pos = player_transform.translation;
+        
+        // Pseudo-random based on time
+        let seed = time.elapsed_seconds();
+        let r_x = (seed * 123.4).sin() * 50.0;
+        let r_z = (seed * 567.8).cos() * 50.0;
+        
+        let x = (player_pos.x + r_x) as i32;
+        let z = (player_pos.z + r_z) as i32;
+        
+        let (_, _, height, _) = crate::world::get_terrain_height(x, z, &world_gen.perlin);
+        
+        let pos = IVec3::new(x, height, z);
+        // Check if chunk is generated (block exists)
+        if voxel_world.blocks.contains_key(&pos) {
+             // Check if space above is empty
+             if !voxel_world.blocks.contains_key(&(pos + IVec3::Y)) {
+                 commands.spawn((
+                     PbrBundle {
+                         mesh: voxel_assets.sheep_mesh.clone(),
+                         material: voxel_assets.sheep_material.clone(),
+                         transform: Transform::from_xyz(x as f32, height as f32 + 1.0, z as f32),
+                         ..default()
+                     },
+                     Sheep {
+                         move_timer: Timer::from_seconds(3.0, TimerMode::Repeating),
+                         target_dir: Vec3::ZERO,
+                         velocity: Vec3::ZERO,
+                     }
+                 )).with_children(|parent| {
+                     // Head
+                     parent.spawn(PbrBundle {
+                         mesh: voxel_assets.sheep_head_mesh.clone(),
+                         material: voxel_assets.sheep_material.clone(),
+                         transform: Transform::from_xyz(0.0, 0.4, -0.4),
+                         ..default()
+                     });
+                     // Legs
+                     let leg_y = -0.5;
+                     let leg_x = 0.2;
+                     let leg_z = 0.35;
+                     for (lx, lz) in [(leg_x, leg_z), (-leg_x, leg_z), (leg_x, -leg_z), (-leg_x, -leg_z)] {
+                         parent.spawn(PbrBundle {
+                             mesh: voxel_assets.sheep_leg_mesh.clone(),
+                             material: voxel_assets.sheep_material.clone(),
+                             transform: Transform::from_xyz(lx, leg_y, lz),
+                             ..default()
+                         });
+                     }
+                 });
+             }
+        }
+    }
+}
+
+fn sheep_ai(
+    mut query: Query<(&mut Transform, &mut Sheep)>,
+    voxel_world: Res<VoxelWorld>,
+    time: Res<Time>,
+) {
+    for (mut transform, mut sheep) in query.iter_mut() {
+        sheep.move_timer.tick(time.delta());
+        
+        // Gravity
+        sheep.velocity.y -= 20.0 * time.delta_seconds();
+        
+        if sheep.move_timer.finished() {
+            // Pick new random direction
+            let seed = time.elapsed_seconds() + transform.translation.x;
+            let angle = (seed * 10.0).sin() * std::f32::consts::PI * 2.0;
+            sheep.target_dir = Vec3::new(angle.cos(), 0.0, angle.sin());
+            
+            // Chance to stop
+            if (seed * 20.0).cos() > 0.5 {
+                sheep.target_dir = Vec3::ZERO;
+            }
+        }
+        
+        // Move
+        if sheep.target_dir != Vec3::ZERO {
+             let speed = 2.0;
+             let movement = sheep.target_dir * speed * time.delta_seconds();
+             let next_pos = transform.translation + movement;
+             
+             // Wall collision check
+             let block_pos = IVec3::new(next_pos.x.round() as i32, next_pos.y.round() as i32, next_pos.z.round() as i32);
+             if voxel_world.blocks.contains_key(&block_pos) {
+                 // Try to jump
+                 if !voxel_world.blocks.contains_key(&(block_pos + IVec3::Y)) && !voxel_world.blocks.contains_key(&(block_pos + IVec3::Y * 2)) {
+                      // Only jump if on ground
+                      let ground_check = IVec3::new(transform.translation.x.round() as i32, (transform.translation.y - 0.6).round() as i32, transform.translation.z.round() as i32);
+                      if voxel_world.blocks.contains_key(&ground_check) {
+                          sheep.velocity.y = 6.0;
+                      }
+                 } else {
+                      sheep.target_dir = Vec3::ZERO; // Stop
+                 }
+             } else {
+                 transform.translation.x = next_pos.x;
+                 transform.translation.z = next_pos.z;
+                 transform.look_to(sheep.target_dir, Vec3::Y);
+             }
+        }
+        
+        // Apply Y velocity
+        transform.translation.y += sheep.velocity.y * time.delta_seconds();
+        
+        // Ground collision
+        let feet_y = transform.translation.y - 0.7;
+        let block_below = IVec3::new(transform.translation.x.round() as i32, (feet_y - 0.1).floor() as i32, transform.translation.z.round() as i32);
+        
+        if voxel_world.blocks.contains_key(&block_below) {
+            transform.translation.y = block_below.y as f32 + 0.5 + 0.7;
+            sheep.velocity.y = 0.0;
         }
     }
 }
