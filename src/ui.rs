@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 use crate::world::VoxelAssets;
 use crate::player::{Health, Player};
+use bevy::input::mouse::MouseWheel;
 use std::collections::HashMap;
 
 #[derive(States, Debug, Clone, Copy, Eq, PartialEq, Hash, Default)]
@@ -9,6 +10,7 @@ pub enum GameState {
     Playing,
     Paused,
     Crafting,
+    Inventory,
 }
 
 #[derive(Resource)]
@@ -36,9 +38,18 @@ pub struct CraftButton {
     pub output_count: u32,
 }
 
+#[derive(Component)]
+pub struct InventoryMenu;
+
+#[derive(Component)]
+pub struct InventoryItemButton {
+    pub block_index: usize,
+}
+
 #[derive(Resource)]
 pub struct Inventory {
     pub selected_slot: usize,
+    pub hotbar: [Option<usize>; 9],
     pub items: HashMap<usize, u32>,
 }
 
@@ -46,9 +57,10 @@ impl Default for Inventory {
     fn default() -> Self {
         let mut items = HashMap::new();
         // Start with 64 of each basic block type
-        for i in 0..10 { items.insert(i, 64); }
+        for i in 0..27 { items.insert(i, 64); }
         Self {
             selected_slot: 0,
+            hotbar: [None; 9], // Default loadout
             items,
         }
     }
@@ -76,11 +88,13 @@ impl Plugin for UiPlugin {
             .insert_resource(Inventory::default())
             .insert_resource(SnakeSettings::default())
             .add_systems(Startup, setup_ui)
-            .add_systems(Update, (inventory_input.run_if(in_state(GameState::Playing)), update_inventory_ui, update_health_ui, toggle_pause, toggle_crafting, handle_snake_toggle, handle_crafting_click))
+            .add_systems(Update, (inventory_input.run_if(in_state(GameState::Playing).or_else(in_state(GameState::Inventory))), update_inventory_ui, update_health_ui, toggle_pause, toggle_crafting, toggle_inventory, handle_snake_toggle, handle_crafting_click, handle_inventory_click))
             .add_systems(OnEnter(GameState::Paused), spawn_pause_menu)
             .add_systems(OnExit(GameState::Paused), despawn_pause_menu)
             .add_systems(OnEnter(GameState::Crafting), spawn_crafting_menu)
-            .add_systems(OnExit(GameState::Crafting), despawn_crafting_menu);
+            .add_systems(OnExit(GameState::Crafting), despawn_crafting_menu)
+            .add_systems(OnEnter(GameState::Inventory), spawn_inventory_menu)
+            .add_systems(OnExit(GameState::Inventory), despawn_inventory_menu);
     }
 }
 
@@ -122,7 +136,7 @@ fn setup_ui(mut commands: Commands) {
         background_color: Color::NONE.into(),
         ..default()
     }).with_children(|parent| {
-        for i in 0..8 {
+        for i in 0..9 {
             parent.spawn((
                 NodeBundle {
                     style: Style {
@@ -209,6 +223,7 @@ fn setup_ui(mut commands: Commands) {
 
 fn inventory_input(
     keys: Res<ButtonInput<KeyCode>>,
+    mut mouse_wheel: EventReader<MouseWheel>,
     mut inventory: ResMut<Inventory>,
 ) {
     if keys.just_pressed(KeyCode::Digit1) { inventory.selected_slot = 0; }
@@ -219,6 +234,15 @@ fn inventory_input(
     if keys.just_pressed(KeyCode::Digit6) { inventory.selected_slot = 5; }
     if keys.just_pressed(KeyCode::Digit7) { inventory.selected_slot = 6; }
     if keys.just_pressed(KeyCode::Digit8) { inventory.selected_slot = 7; }
+    if keys.just_pressed(KeyCode::Digit9) { inventory.selected_slot = 8; }
+
+    for event in mouse_wheel.read() {
+        if event.y > 0.0 {
+            inventory.selected_slot = (inventory.selected_slot + 9 - 1) % 9;
+        } else if event.y < 0.0 {
+            inventory.selected_slot = (inventory.selected_slot + 1) % 9;
+        }
+    }
 }
 
 fn update_inventory_ui(
@@ -239,25 +263,33 @@ fn update_inventory_ui(
 
         if let Some(&child) = children.get(0) {
             if let Ok(mut bg) = bg_query.get_mut(child) {
-                if let Some(handle) = voxel_assets.block_types.get(slot.index) {
-                    if let Some(mat) = materials.get(handle) {
-                        bg.0 = mat.base_color;
+                if let Some(block_idx) = inventory.hotbar[slot.index] {
+                    if let Some(handle) = voxel_assets.block_types.get(block_idx) {
+                        if let Some(mat) = materials.get(handle) {
+                            bg.0 = mat.base_color;
+                        }
                     }
+                } else {
+                    bg.0 = Color::NONE.into();
                 }
             }
         }
 
         if let Some(&child) = children.get(1) {
             if let Ok(mut text) = text_query.get_mut(child) {
-                let count = inventory.items.get(&slot.index).unwrap_or(&0);
+                let count = if let Some(block_idx) = inventory.hotbar[slot.index] { *inventory.items.get(&block_idx).unwrap_or(&0) } else { 0 };
                 text.sections[0].value = format!("{}", count);
             }
         }
     }
 
     if let Ok(mut text) = selected_text_query.get_single_mut() {
-        if let Some(name) = voxel_assets.block_names.get(inventory.selected_slot) {
-            text.sections[0].value = name.clone();
+        if let Some(block_idx) = inventory.hotbar[inventory.selected_slot] {
+            if let Some(name) = voxel_assets.block_names.get(block_idx) {
+                text.sections[0].value = name.clone();
+            }
+        } else {
+            text.sections[0].value = "".to_string();
         }
     }
 }
@@ -277,6 +309,30 @@ fn toggle_crafting(
                 window.cursor.grab_mode = bevy::window::CursorGrabMode::None;
             },
             GameState::Crafting => {
+                next_state.set(GameState::Playing);
+                window.cursor.visible = false;
+                window.cursor.grab_mode = bevy::window::CursorGrabMode::Locked;
+            },
+            _ => {}
+        }
+    }
+}
+
+fn toggle_inventory(
+    mut next_state: ResMut<NextState<GameState>>,
+    state: Res<State<GameState>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut windows: Query<&mut Window>,
+) {
+    if keys.just_pressed(KeyCode::Tab) {
+        let mut window = windows.single_mut();
+        match state.get() {
+            GameState::Playing => {
+                next_state.set(GameState::Inventory);
+                window.cursor.visible = true;
+                window.cursor.grab_mode = bevy::window::CursorGrabMode::None;
+            },
+            GameState::Inventory => {
                 next_state.set(GameState::Playing);
                 window.cursor.visible = false;
                 window.cursor.grab_mode = bevy::window::CursorGrabMode::Locked;
@@ -306,6 +362,11 @@ fn toggle_pause(
                 window.cursor.grab_mode = bevy::window::CursorGrabMode::Locked;
             },
             GameState::Crafting => {
+                next_state.set(GameState::Playing);
+                window.cursor.visible = false;
+                window.cursor.grab_mode = bevy::window::CursorGrabMode::Locked;
+            },
+            GameState::Inventory => {
                 next_state.set(GameState::Playing);
                 window.cursor.visible = false;
                 window.cursor.grab_mode = bevy::window::CursorGrabMode::Locked;
@@ -419,6 +480,11 @@ fn spawn_crafting_menu(mut commands: Commands, voxel_assets: Res<VoxelAssets>) {
             (2, 2, 7, 1), // 2 Stone -> 1 Sand
             (7, 2, 1, 1), // 2 Sand -> 1 Dirt
             (3, 1, 11, 4), // 1 Wood -> 4 Leaves
+            (3, 1, 14, 4), // 1 Wood -> 4 Torches
+            (2, 8, 19, 1), // 8 Stone -> 1 Furnace
+            (3, 2, 24, 1), // 2 Wood -> 1 Pickaxe
+            (3, 2, 25, 1), // 2 Wood -> 1 Axe
+            (3, 2, 26, 1), // 2 Wood -> 1 Shovel
         ];
 
         for (in_idx, in_count, out_idx, out_count) in recipes {
@@ -476,6 +542,113 @@ fn handle_crafting_click(
             },
             Interaction::None => {
                 bg.0 = Color::srgb(0.3, 0.3, 0.3).into();
+            }
+        }
+    }
+}
+
+fn spawn_inventory_menu(mut commands: Commands, voxel_assets: Res<VoxelAssets>, materials: Res<Assets<StandardMaterial>>) {
+    commands.spawn((
+        NodeBundle {
+            style: Style {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                flex_direction: FlexDirection::Column,
+                position_type: PositionType::Absolute,
+                ..default()
+            },
+            background_color: Color::srgba(0.0, 0.0, 0.0, 0.8).into(),
+            z_index: ZIndex::Global(10),
+            ..default()
+        },
+        InventoryMenu,
+    )).with_children(|parent| {
+        parent.spawn(TextBundle::from_section(
+            "INVENTORY (Tab to Close)",
+            TextStyle { font_size: 40.0, color: Color::WHITE, ..default() },
+        ));
+        
+        parent.spawn(TextBundle::from_section(
+            "Click a block to assign it to the selected hotbar slot",
+            TextStyle { font_size: 20.0, color: Color::srgb(0.5, 0.5, 0.5), ..default() },
+        ));
+
+        parent.spawn(NodeBundle {
+            style: Style {
+                display: Display::Grid,
+                grid_template_columns: vec![GridTrack::auto(); 8], // 8 columns
+                margin: UiRect::top(Val::Px(20.0)),
+                ..default()
+            },
+            ..default()
+        }).with_children(|grid| {
+            for (i, name) in voxel_assets.block_names.iter().enumerate() {
+                grid.spawn((
+                    ButtonBundle {
+                        style: Style {
+                            width: Val::Px(80.0),
+                            height: Val::Px(80.0),
+                            margin: UiRect::all(Val::Px(5.0)),
+                            justify_content: JustifyContent::Center,
+                            align_items: AlignItems::Center,
+                            flex_direction: FlexDirection::Column,
+                            ..default()
+                        },
+                        background_color: Color::srgb(0.2, 0.2, 0.2).into(),
+                        ..default()
+                    },
+                    InventoryItemButton { block_index: i },
+                )).with_children(|btn| {
+                    // Color preview
+                    if let Some(handle) = voxel_assets.block_types.get(i) {
+                         if let Some(mat) = materials.get(handle) {
+                             btn.spawn(NodeBundle {
+                                 style: Style {
+                                     width: Val::Px(30.0),
+                                     height: Val::Px(30.0),
+                                     margin: UiRect::bottom(Val::Px(5.0)),
+                                     ..default()
+                                 },
+                                 background_color: mat.base_color.into(),
+                                 ..default()
+                             });
+                         }
+                    }
+                    
+                    btn.spawn(TextBundle::from_section(
+                        name,
+                        TextStyle { font_size: 14.0, color: Color::WHITE, ..default() }
+                    ));
+                });
+            }
+        });
+    });
+}
+
+fn despawn_inventory_menu(mut commands: Commands, query: Query<Entity, With<InventoryMenu>>) {
+    for entity in query.iter() {
+        commands.entity(entity).despawn_recursive();
+    }
+}
+
+fn handle_inventory_click(
+    mut interaction_query: Query<(&Interaction, &InventoryItemButton, &mut BackgroundColor), (Changed<Interaction>, With<InventoryItemButton>)>,
+    mut inventory: ResMut<Inventory>,
+) {
+    for (interaction, button, mut bg) in interaction_query.iter_mut() {
+        match *interaction {
+            Interaction::Pressed => {
+                let slot = inventory.selected_slot;
+                inventory.hotbar[slot] = Some(button.block_index);
+                bg.0 = Color::srgb(0.2, 0.8, 0.2).into();
+            },
+            Interaction::Hovered => {
+                bg.0 = Color::srgb(0.4, 0.4, 0.4).into();
+            },
+            Interaction::None => {
+                bg.0 = Color::srgb(0.2, 0.2, 0.2).into();
             }
         }
     }
