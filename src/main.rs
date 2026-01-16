@@ -16,7 +16,7 @@ impl Default for DayNightCycle {
     fn default() -> Self {
         Self {
             time: 6.0, // Start at 6 AM
-            day_duration: 900.0, // 15 minutes for a full day/night cycle (10 min day + 5 min night)
+            day_duration: 10.0,//900.0, // 15 minutes for a full day/night cycle (10 min day + 5 min night)
             is_day: true,
         }
     }
@@ -101,6 +101,7 @@ fn update_day_night_cycle(
         Query<(Entity, &mut Transform, &mut DirectionalLight), With<Sun>>,
         Query<(Entity, &mut Transform, &mut DirectionalLight), With<Moon>>,
     )>,
+    mut ambient_light: ResMut<AmbientLight>,
     time: Res<Time>,
 ) {
     // Update time - 15 minutes total cycle (10 min day + 5 min night)
@@ -135,31 +136,87 @@ fn update_day_night_cycle(
 
     // Update sun position and intensity
     if let Ok((_, mut sun_transform, mut sun_light)) = light_params.p0().get_single_mut() {
-        let x = sun_angle.sin();
-        let y = -sun_angle.cos();
-        sun_transform.rotation = Quat::from_rotation_arc(Vec3::Y, Vec3::new(x, y, 0.0).normalize_or_zero());
+        // Calculate sun position in the sky based on time
+        // At 6 AM (time 0), sun is at -PI/2 (eastern horizon)
+        // At 12 PM (time 8), sun is at 0 (directly overhead)
+        // At 6 PM (time 16), sun is at PI/2 (western horizon)
+        let adjusted_sun_angle = sun_angle - std::f32::consts::FRAC_PI_2; // Shift to start from eastern horizon
+
+        let x = adjusted_sun_angle.sin();
+        let y = -adjusted_sun_angle.cos();
+        let z = 0.3; // Slight Z offset to make the sun come from the east-west direction
+
+        // Create a direction vector and normalize it
+        let sun_direction = Vec3::new(x, y, z).normalize_or_zero();
+
+        // Update sun rotation to point in the calculated direction
+        sun_transform.rotation = Quat::from_rotation_arc(Vec3::Y, -sun_direction);
 
         // Calculate sun altitude (how high it is in the sky)
-        let sun_direction = sun_transform.forward();
-        let sun_altitude = (-sun_direction.y).max(0.0); // Flip Y since forward is negative Y
+        let sun_altitude = (-sun_direction.y).max(0.05); // Minimum 0.05 to avoid complete darkness
 
         // Adjust sun intensity based on altitude (brighter when higher in sky)
         sun_light.illuminance = 10000.0 * sun_altitude;
         sun_light.shadows_enabled = sun_altitude > 0.1; // Disable shadows when sun is low
+
+        // Adjust sun color based on time of day (warmer at sunrise/sunset)
+        let hour_fraction = day_night_cycle.time / 16.0; // Normalize to 0-1 over the day period
+        let warmth = (hour_fraction * std::f32::consts::PI).sin(); // Peaks at midday
+        sun_light.color = Color::srgb(
+            1.0,
+            0.8 + 0.2 * warmth.abs(), // More yellow at midday
+            0.6 + 0.2 * warmth.abs()  // More orange at sunrise/sunset
+        );
     }
 
     // Update moon position and intensity
     if let Ok((_, mut moon_transform, mut moon_light)) = light_params.p1().get_single_mut() {
-        let x = moon_angle.sin();
-        let y = -moon_angle.cos();
-        moon_transform.rotation = Quat::from_rotation_arc(Vec3::Y, Vec3::new(x, y, 0.0).normalize_or_zero());
+        // Calculate moon position in the sky based on time
+        // Moon is opposite to sun during night
+        let adjusted_moon_angle = moon_angle + std::f32::consts::PI; // Opposite side of the sky
+        let x = adjusted_moon_angle.sin();
+        let y = -adjusted_moon_angle.cos();
+        let z = -0.3; // Slight Z offset in opposite direction
+
+        // Create a direction vector and normalize it
+        let moon_direction = Vec3::new(x, y, z).normalize_or_zero();
+
+        // Update moon rotation to point in the calculated direction
+        moon_transform.rotation = Quat::from_rotation_arc(Vec3::Y, -moon_direction);
 
         // Calculate moon altitude (how high it is in the sky)
-        let moon_direction = moon_transform.forward();
-        let moon_altitude = (-moon_direction.y).max(0.0); // Flip Y since forward is negative Y
+        let moon_altitude = (-moon_direction.y).max(0.05); // Minimum 0.05 to avoid complete darkness
 
-        // Adjust moon intensity based on altitude (dimmer than sun)
+        // Adjust moon intensity based on altitude (much dimmer than sun)
         moon_light.illuminance = 1500.0 * moon_altitude;
         moon_light.color = Color::srgb(0.7, 0.7, 1.0); // Cool blue tint
+
+        // Enable/disable moon shadows based on visibility
+        moon_light.shadows_enabled = moon_altitude > 0.3;
+    }
+
+    // Update ambient light based on time of day
+    if day_night_cycle.is_day {
+        // Daytime - brighter ambient light
+        let sun_altitude = if day_night_cycle.time >= 0.0 && day_night_cycle.time < 16.0 {
+            let sun_time = day_night_cycle.time / 16.0 * std::f32::consts::PI;
+            sun_time.sin().max(0.1) // Minimum ambient during day
+        } else {
+            0.1
+        };
+
+        ambient_light.brightness = 0.5 + 0.5 * sun_altitude; // Range from 0.5 to 1.0
+        ambient_light.color = Color::srgb(1.0, 0.98, 0.95); // Slightly warm daylight
+    } else {
+        // Nighttime - dimmer ambient light
+        let moon_altitude = if day_night_cycle.time >= 16.0 {
+            let moon_time = (day_night_cycle.time - 16.0) / 8.0 * std::f32::consts::PI;
+            moon_time.sin().max(0.05) // Minimum ambient at night
+        } else {
+            0.05
+        };
+
+        ambient_light.brightness = 0.1 + 0.1 * moon_altitude; // Range from 0.1 to 0.2
+        ambient_light.color = Color::srgb(0.2, 0.2, 0.4); // Cool blue night light
     }
 }

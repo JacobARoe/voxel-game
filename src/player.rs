@@ -446,6 +446,21 @@ fn interact_terrain(
                                             }
                                         }
                                     }
+
+                                    // Update the chunk that contained the removed block to ensure proper mesh updates
+                                    let chunk_coord = IVec2::new(
+                                        (block_pos.x as f32 / CHUNK_SIZE as f32).floor() as i32,
+                                        (block_pos.z as f32 / CHUNK_SIZE as f32).floor() as i32,
+                                    );
+                                    if let Some(chunk_entities) = voxel_world.chunks.get(&chunk_coord) {
+                                        for &pos_in_chunk in chunk_entities {
+                                            if let Some(&entity) = voxel_world.blocks.get(&pos_in_chunk) {
+                                                if let Some(mut ec) = commands.get_entity(entity) {
+                                                    ec.insert(NeedsMeshUpdate);
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -517,6 +532,21 @@ fn interact_terrain(
                                             if let Some(mut ec) = commands.get_entity(nn_entity) {
                                                 ec.insert(NeedsMeshUpdate);
                                             }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Update the chunk that contained the removed block to ensure proper mesh updates
+                            let chunk_coord = IVec2::new(
+                                (block_pos.x as f32 / CHUNK_SIZE as f32).floor() as i32,
+                                (block_pos.z as f32 / CHUNK_SIZE as f32).floor() as i32,
+                            );
+                            if let Some(chunk_entities) = voxel_world.chunks.get(&chunk_coord) {
+                                for &pos_in_chunk in chunk_entities {
+                                    if let Some(&entity) = voxel_world.blocks.get(&pos_in_chunk) {
+                                        if let Some(mut ec) = commands.get_entity(entity) {
+                                            ec.insert(NeedsMeshUpdate);
                                         }
                                     }
                                 }

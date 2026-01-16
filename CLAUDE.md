@@ -7,9 +7,11 @@ A dune-inspired voxel sandbox adventure game.
 - Rust
 - Game engine: bevy
 
+## Dev Notes
+- When running `cargo build` or `cargo run`, always include the `--release` flag.
+
 ## Known Issues
-- Blocks are shrunk and have gaps between them. 
-- Sounds are not playing properly. 
+- Breaking blocks doesn't caused revealed blocks to render. 
+- Day/night cycle doesn't pause when the game is paused 
 
 ## Desired Tweaks
-None currently.
